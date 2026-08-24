@@ -238,26 +238,6 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Agente de Inventario", lifespan=lifespan)
 
-@app.get("/webhook")
-async def verificar_webhook(request: Request):
-    params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        logger.info("✅ Webhook de Meta verificado correctamente")
-        return Response(content=challenge, media_type="text/plain", status_code=200)
-    else:
-        logger.error("❌ Fallo en la verificación del webhook de Meta")
-        return Response(content="Error de verificación", status_code=403)
-
-@app.post("/webhook")
-async def recibir_mensajes(request: Request):
-    data = await request.json()
-    logger.info(f"📩 Mensaje recibido de WhatsApp: {data}")
-    # Aquí puedes procesar el payload entrante de Meta
-    return Response(content="EVENT_RECEIVED", status_code=200)
 
 def fecha_local_mensaje(message: Dict[str, Any]) -> str:
     marca = message.get("timestamp")
@@ -1089,7 +1069,7 @@ def debug() -> Dict[str, Any]:
     }
 
 
-@app.get("/webhook")
+@app.get("/webhook/whatsapp")
 async def verificar_webhook(request: Request) -> Response:
     p = request.query_params
     logger.info(f"GET /webhook/whatsapp - Parámetros: {dict(p)}")
@@ -1102,7 +1082,7 @@ async def verificar_webhook(request: Request) -> Response:
     return Response("Token inválido", status_code=403)
 
 
-@app.post("/webhook")
+@app.post("/webhook/whatsapp")
 async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) -> Response:
     cuerpo = await request.body()
     firma = request.headers.get("X-Hub-Signature-256", "")
