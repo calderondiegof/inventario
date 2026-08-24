@@ -248,9 +248,16 @@ async def verificar_webhook(request: Request):
     if mode == "subscribe" and token == VERIFY_TOKEN:
         logger.info("✅ Webhook de Meta verificado correctamente")
         return Response(content=challenge, media_type="text/plain", status_code=200)
-    else
+    else:
         logger.error("❌ Fallo en la verificación del webhook de Meta")
         return Response(content="Error de verificación", status_code=403)
+
+@app.post("/webhook")
+async def recibir_mensajes(request: Request):
+    data = await request.json()
+    logger.info(f"📩 Mensaje recibido de WhatsApp: {data}")
+    # Aquí puedes procesar el payload entrante de Meta
+    return Response(content="EVENT_RECEIVED", status_code=200)
 
 def fecha_local_mensaje(message: Dict[str, Any]) -> str:
     marca = message.get("timestamp")
