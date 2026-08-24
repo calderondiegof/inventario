@@ -762,6 +762,8 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha_ayer)
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
+        
+# 1. Cuando piden ver el menú de opciones de inventario
     if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
         await enviar_botones_whatsapp(
             telefono, 
@@ -774,7 +776,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         )
         return
 
-    # 👇 MANEJADORES DE LOS 3 NUEVOS SUB-BOTONES
+    # 2. Cuando hacen clic en el sub-botón de "Inventario total"
     if texto_normalizado == "inv_total":
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
@@ -788,12 +790,14 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
         return
 
+    # 3. Cuando hacen clic en el sub-botón de "Ver movimientos"
     if texto_normalizado == "inv_movs":
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
         return
 
+    # 4. Cuando hacen clic en el sub-botón de "Reporte de hoy"
     if texto_normalizado == "inv_hoy":
         reporte = await asyncio.to_thread(
             inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
@@ -801,6 +805,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
 
+    # 5. Captura rápida directa por texto para movimientos
+    if texto_normalizado in {"movimientos", "ver movimientos", "historial"}:
+        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+        return
+        
     # 👇 BLOQUE OBLIGATORIO PARA CAPTURAR "MOVIMIENTOS" AL VUELO
     if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "movimientos material"}:
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
