@@ -1110,17 +1110,28 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) 
     return Response("EVENT_RECEIVED", status_code=200)
 
 
-@app.post("/webhook/test")
-async def webhook_test(request: Request) -> Response:
+@app.post("/webhook")
+async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) -> Response:
     cuerpo = await request.body()
-    logger.info(f"🧪 TEST webhook recibido: {cuerpo}")
+    firma = request.headers.get("X-Hub-Signature-256", "")
+    logger.info("📨 POST /webhook - Recibido webhook de WhatsApp")
+    
+    if META_APP_SECRET:
+        esperada = "sha256=" + hmac.new(META_APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(firma, esperada):
+            logger.warning("❌ Firma HMAC inválida. Revisa tu META_APP_SECRET en Render.")
+            return Response("Firma inválida", status_code=403)
+        logger.info("✅ Firma validada correctamente")
+
     try:
         datos = json.loads(cuerpo)
-        await procesar_webhook(datos)
-        return Response("TEST_OK", status_code=200)
-    except Exception as e:
-        logger.error(f"❌ Error en test webhook: {e}")
-        return Response(f"Error: {e}", status_code=400)
+        # Aquí está la clave para que corra tu función procesar_webhook en segundo plano:
+        background_tasks.add_task(procesar_webhook, datos)
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Error parseando JSON: {e}")
+        return Response(f"Error parseando JSON: {e}", status_code=400)
+
+    return Response("EVENT_RECEIVED", status_code=200)
 
 
 @app.get("/download/{nombre_archivo}")
