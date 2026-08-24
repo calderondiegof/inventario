@@ -323,22 +323,10 @@ async def enviar_botones_whatsapp(destino: str, texto: str, opciones: List[tuple
     }
     await enviar_mensaje_whatsapp_json(payload)
 
-
-async def enviar_imagen_whatsapp(destino: str, url_imagen: str, leyenda: str) -> None:
-    to_clean = re.sub(r"\D", "", str(destino))
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to_clean,
-        "type": "image",
-        "image": {"link": url_imagen, "caption": leyenda}
-    }
-    await enviar_mensaje_whatsapp_json(payload)
-
 async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_documento: str = "documento.pdf") -> None:
     """
-    Función definitiva integrada: Espera el cierre del archivo, fuerza la subida
-    física completa a Supabase Storage y envía el PDF público a Meta API.
+    Función definitiva optimizada: Valida el archivo en disco, genera la estructura 
+    pública e impacta de forma segura en Supabase Storage sin perder la conexión.
     """
     if not http_client:
         logger.error("❌ http_client no inicializado")
@@ -347,53 +335,47 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
     logger.info(f"📄 Iniciando proceso de envío de documento a {destino}: {ruta_archivo}")
 
     try:
-        # 1. Pausa de seguridad: Espera a que el generador de PDF cierre el archivo en disco
+        # 1. Validación del archivo en disco de Render
         await asyncio.sleep(2.0)
         
         if not os.path.exists(ruta_archivo):
             logger.error(f"❌ Archivo físico no encontrado en la ruta: {ruta_archivo}")
-            await enviar_mensaje_whatsapp(destino, "⚠️ El sistema generó la venta pero el archivo PDF no se encontró en el servidor.")
             return
 
         tamano_bytes = os.path.getsize(ruta_archivo)
         logger.info(f"📦 Tamaño del PDF detectado en disco: {tamano_bytes} bytes")
         if tamano_bytes == 0:
-            logger.error("❌ El archivo PDF está vacío (0 bytes). El generador de PDF falló.")
-            await enviar_mensaje_whatsapp(destino, "⚠️ Error: El archivo de remisión se generó vacío.")
+            logger.error("❌ El archivo PDF está vacío (0 bytes).")
             return
 
-        # 2. Subida física forzada a Supabase Storage
-        url_documento = None
         bucket_name = "remisiones"
         nombre_remoto = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{nombre_documento}"
+        url_documento = None
 
+        # 2. Subida Síncrona Directa y Controlada a Supabase
         if supabase:
             try:
-                logger.info(f"⏳ Transfiriendo archivo físico a Supabase Storage: {nombre_remoto}...")
+                logger.info(f"⏳ Ejecutando subida física a Supabase Storage: {nombre_remoto}...")
                 
                 with open(ruta_archivo, "rb") as f:
                     file_data = f.read()
 
-                # Forzamos application/pdf para evitar que Supabase lo catalogue como HTML corrupto
+                # Forzamos tipo MIME application/pdf
                 options = {
                     "content-type": "application/pdf", 
                     "upsert": "true"
                 }
 
-                # Bypass asíncrono obligatorio para el SDK síncrono de Supabase
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, 
-                    lambda: supabase.storage.from_(bucket_name).upload(
-                        path=nombre_remoto,
-                        file=file_data,
-                        file_options=options
-                    )
+                # Ejecución directa en el hilo principal para asegurar la persistencia en la nube
+                supabase.storage.from_(bucket_name).upload(
+                    path=nombre_remoto,
+                    file=file_data,
+                    file_options=options
                 )
                 
                 logger.info(f"✅ ¡Confirmado! Archivo guardado físicamente en Supabase.")
 
-                # Extracción de la URL 100% pública
+                # Generación de la URL pública oficial de descarga
                 res_url = supabase.storage.from_(bucket_name).get_public_url(nombre_remoto)
                 url_documento = res_url if isinstance(res_url, str) else getattr(res_url, "public_url", str(res_url))
                 logger.info(f"🔗 URL Pública generada por Supabase Storage: {url_documento}")
@@ -402,15 +384,15 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
                 logger.error(f"❌ Falló la subida física al Storage de Supabase: {storage_err}")
                 url_documento = None
 
-        # 3. Ruta de respaldo local (Si Supabase falla)
+        # 3. Ruta de respaldo local (Asegurando tu URL real de Render en producción)
         if not url_documento:
             logger.warning("⚠️ Utilizando servidor local de Render como ruta de respaldo para la descarga")
             base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip('/')
             if not base_url:
-                base_url = "https://onrender.com"
+                base_url = "https://inventario-qcza.onrender.com"
             url_documento = f"{base_url}/download/{os.path.basename(ruta_archivo)}"
 
-        # 4. Envío seguro a Meta API
+        # 4. Envío de datos a Meta API
         to_clean = re.sub(r"\D", "", str(destino))
         payload = {
             "messaging_product": "whatsapp",
