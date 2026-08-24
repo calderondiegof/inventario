@@ -47,33 +47,22 @@ logger.warning(f"✓ PHONE_NUMBER_ID: {'✅' if PHONE_NUMBER_ID else '❌'}")
 logger.warning(f"✓ META_APP_SECRET: {'✅' if META_APP_SECRET else '❌'}")
 logger.warning("=" * 60)
 
-# Inicialización de variables globales
+# Inicialización de Supabase
 supabase: Optional[Client] = None
 inventario: Optional[InventarioServiceConValidacion] = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        inventario = InventarioServiceConValidacion(supabase)
+        logger.info("✅ Supabase conectado")
+    except Exception as e:
+        logger.error(f"❌ Error conectando a Supabase: {e}")
+else:
+    logger.warning("⚠️ Supabase no configurado")
+
 http_client: Optional[httpx.AsyncClient] = None
 BOGOTA = ZoneInfo("America/Bogota")
-
-app = FastAPI(title="Agente de Inventario")
-
-# Lifespan para arranque rápido y asíncrono en Render (sin bloqueos previos)
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global http_client, supabase, inventario
-    http_client = httpx.AsyncClient(timeout=httpx.Timeout(35.0))
-    if SUPABASE_URL and SUPABASE_KEY:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            inventario = InventarioServiceConValidacion(supabase)
-            logger.info("✅ Supabase conectado y servicio iniciado en lifespan")
-        except Exception as e:
-            logger.error(f"❌ Error conectando a Supabase en lifespan: {e}")
-    else:
-        logger.warning("⚠️ Supabase no configurado")
-    yield
-    if http_client:
-        await http_client.aclose()
-
-app.router.lifespan_context = lifespan
 
 # Expresiones regulares y utilidades
 LINEA_MATERIAL_CANTIDAD = re.compile(r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE)
@@ -131,6 +120,7 @@ def parsear_campos_cliente_venta(texto: str) -> Dict[str, str]:
         if m and m.group(1).strip().lower() in mapeo and m.group(2).strip():
             campos[mapeo[m.group(1).strip().lower()]] = m.group(2).strip()
             
+    # Orden estricto por comas: [Nombre Conductor, ID Conductor, Placa, Celular Conductor]
     if not campos and partes:
         if len(partes) >= 4:
             campos["cliente_conductor"] = partes[0]
@@ -190,6 +180,7 @@ def formatear_movimientos_material(resultado: Dict[str, Any]) -> str:
 
 
 def clean_payload(obj: Any) -> Any:
+    """Elimina explícitamente valores None recursivamente para evitar rechazos en la API de WhatsApp."""
     if isinstance(obj, dict):
         return {k: clean_payload(v) for k, v in obj.items() if v is not None}
     elif isinstance(obj, list):
@@ -197,6 +188,7 @@ def clean_payload(obj: Any) -> Any:
     return obj
 
 
+# Modelos Pydantic para estructura del agente
 class ItemMaterial(BaseModel):
     material_nombre: str
     cantidad_kg: float
@@ -221,9 +213,9 @@ class RespuestaAgente(BaseModel):
     cliente_direccion: Optional[str] = None
     cliente_placa: Optional[str] = None
     cliente_conductor: Optional[str] = None
-    cliente_conductor_id: Optional[str] = None
+    cliente_conductor_id: Optional[str] = None  # <--- Incluido para capturar el ID del conductor
     cliente_celular: Optional[str] = None
-    cliente_conductor_celular: Optional[str] = None
+    cliente_conductor_celular: Optional[str] = None  # <--- Nuevo: Celular del conductor
     consulta_material: Optional[str] = None
     respuesta_texto: str = ""
 
@@ -236,6 +228,17 @@ class RespuestaAgente(BaseModel):
         return value
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global http_client
+    http_client = httpx.AsyncClient(timeout=httpx.Timeout(35.0))
+    yield
+    await http_client.aclose()
+
+
+app = FastAPI(title="Agente de Inventario", lifespan=lifespan)
+
+
 def fecha_local_mensaje(message: Dict[str, Any]) -> str:
     marca = message.get("timestamp")
     if marca:
@@ -243,6 +246,7 @@ def fecha_local_mensaje(message: Dict[str, Any]) -> str:
     return datetime.now(BOGOTA).date().isoformat()
 
 
+# Funciones de mensajería para WhatsApp API
 async def enviar_mensaje_whatsapp_json(payload: Dict[str, Any]) -> None:
     if not http_client:
         logger.error("❌ http_client no inicializado")
@@ -440,6 +444,7 @@ def fusionar_borrador(anterior: Dict[str, Any], nuevo: RespuestaAgente) -> Dict[
     datos = nuevo.model_dump(exclude_none=True)
     resultado = dict(anterior)
     
+    # Acumulación segura de materiales sin sobrescribir (Regla clave)
     if "items" in datos:
         items_existentes = {i["material_nombre"].lower(): i for i in resultado.get("items", [])}
         for item in datos["items"]:
@@ -453,6 +458,7 @@ def fusionar_borrador(anterior: Dict[str, Any], nuevo: RespuestaAgente) -> Dict[
         resultado["items"] = list(items_existentes.values())
         datos.pop("items")
 
+    # Acumulación de entradas de revuelto
     if "entradas_revuelto" in datos:
         existentes_rev = resultado.get("entradas_revuelto", [])
         existentes_rev.extend(datos["entradas_revuelto"])
@@ -489,6 +495,8 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
     if intento == "SELECCION_REVUELTO" and not datos.get("items") and not datos.get("merma_kg", 0):
         return "Indica los materiales seleccionados o la cantidad de basura a descontar del Revuelto.", "items"
     
+    # Máquina de estados estricta para VENTA_DESPACHO
+# Máquina de estados estricta para VENTA_DESPACHO
     if intento == "VENTA_DESPACHO":
         if not datos.get("cliente"):
             return "Indica el nombre del cliente, por favor.", "cliente"
@@ -503,6 +511,7 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
             if faltantes:
                 return f"Es un cliente nuevo, para registrarlo también necesito su {', '.join(faltantes)}.", "cliente_datos"
         
+# Validación obligatoria de los datos completos del conductor y vehículo
         faltantes_conductor = []
         if not datos.get("cliente_conductor"):
             faltantes_conductor.append("nombre del conductor")
@@ -661,6 +670,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     material_encontrado = None
                     texto_buscado = texto.lower().strip()
                     
+                    # Búsqueda flexible en el catálogo de materiales
                     for mat in inventario.catalogo_materiales.values():
                         if texto_buscado in mat.nombre.lower():
                             material_encontrado = mat
@@ -722,7 +732,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, respuesta_texto)
         return
-
     # Comandos directos por texto
     if texto.lower() == "anular":
         contexto["accion_pendiente"] = {"tipo": "espera_numero_remision"}
@@ -741,7 +750,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         else:
             await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
         return
-        
     texto_normalizado = texto.lower().strip()
     if texto_normalizado in {"reporte de hoy", "reporte hoy", "ver reporte de hoy"}:
         reporte = await asyncio.to_thread(
@@ -755,11 +763,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
         
-    # 1. Atrapamos el ID exacto cuando presionan o escriben la opción general de inventario
+# 1. Atrapamos el ID exacto cuando presionan el botón principal del menú
     if texto_normalizado in {"ver_inventario", "ver inventario", "ver saldos", "saldos", "inventario"}:
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
+        # Si el usuario escribió o presionó la opción de ver inventario, desplegamos los 3 sub-botones
         await enviar_botones_whatsapp(
             telefono, 
             "¿Qué deseas consultar en el inventario?", 
@@ -801,7 +807,14 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
 
     # 5. Acceso directo por texto para movimientos
-    if texto_normalizado in {"movimientos", "ver movimientos", "historial", "movimiento", "movimientos material"}:
+    if texto_normalizado in {"movimientos", "ver movimientos", "historial"}:
+        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+        return
+        
+    # 👇 BLOQUE OBLIGATORIO PARA CAPTURAR "MOVIMIENTOS" AL VUELO
+    if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "movimientos material"}:
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
         contexto["borrador_pendiente"] = {}
         contexto["campo_esperado"] = None
@@ -809,7 +822,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
         return
 
-    # Opciones de Menú principal numéricas/texto
+    # Opciones de Menú
     if texto in {"1", "Ingresar Inventario"}:
         contexto["campo_esperado"] = "menu_ingreso"
         await guardar_contexto(usuario_id, contexto)
@@ -826,18 +839,16 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
 
     elif texto in {"2", "Ver Inventario"}:
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_botones_whatsapp(
-            telefono, 
-            "¿Qué deseas consultar en el inventario?", 
-            [
-                ("inv_total", "Inventario total"), 
-                ("inv_movs", "Ver movimientos"), 
-                ("inv_hoy", "Reporte de hoy")
-            ]
-        )
+        saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
+        if not saldos:
+            await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
+        else:
+            saldos_ordenados = sorted(saldos, key=lambda x: x["saldo_kg"], reverse=True)
+            total_kg = sum(x["saldo_kg"] for x in saldos_ordenados)
+            lineas = [f"📦 Inventario actual — Bodega #{bodega_id}", ""]
+            lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos_ordenados]
+            lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
+            await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
         return
 
     elif texto in {"3", "Anular Inventario"}:
@@ -846,6 +857,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, "¿Qué remisión deseas anular o corregir? (ejemplo: REM_112)")
         return
 
+    
     await asyncio.to_thread(inventario.recargar_catalogos)
     fecha_mensaje = fecha_local_mensaje(message)
     borrador_anterior = contexto.get("borrador_pendiente") or {}
@@ -865,6 +877,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             if valor:
                 datos[clave] = valor
             
+        # Respaldo por posiciones si no vinieron etiquetados
         if not datos.get("cliente_conductor") or not datos.get("cliente_conductor_id") or not datos.get("cliente_placa") or not datos.get("cliente_conductor_celular"):
             partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
             if len(partes) >= 4:
@@ -881,6 +894,40 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                 if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[1]
             elif len(partes) == 1 and not datos.get("cliente_conductor"):
                 datos["cliente_conductor"] = partes[0]
+        
+        # Actualizamos todos los campos extraídos por el parser sin dejar ninguno fuera
+        for clave, valor in campos_extraidos.items():
+            if valor:
+                datos[clave] = valor
+            
+        # Respaldo por si el parser no atrapó las posiciones automáticamente
+        if not datos.get("cliente_conductor") or not datos.get("cliente_conductor_id") or not datos.get("cliente_placa") or not datos.get("cliente_celular"):
+            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
+            if len(partes) >= 4:
+                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
+                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
+                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
+                if not datos.get("cliente_celular"): datos["cliente_celular"] = partes[3]
+            elif len(partes) == 3:
+                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
+                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
+                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
+            elif len(partes) == 2:
+                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
+                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[1]
+            elif len(partes) == 1 and not datos.get("cliente_conductor"):
+                datos["cliente_conductor"] = partes[0]
+            
+        # Respaldo por si el parser estricto no atrapó ambos componentes
+        if not datos.get("cliente_conductor") or not datos.get("cliente_placa"):
+            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
+            if len(partes) >= 2:
+                datos["cliente_conductor"] = partes[0]
+                datos["cliente_placa"] = partes[1]
+            elif len(partes) == 1 and not datos.get("cliente_conductor"):
+                datos["cliente_conductor"] = partes[0]
+            elif len(partes) == 1 and not datos.get("cliente_placa"):
+                datos["cliente_placa"] = partes[0]
     elif campo_esperado in {"tipo_movimiento", "menu_ingreso"}:
         datos = dict(borrador_anterior)
         eleccion = texto.strip().lower()
@@ -981,7 +1028,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                 cliente_conductor=datos.get("cliente_conductor"),
                 cliente_conductor_id=datos.get("cliente_conductor_id"),
                 cliente_placa=datos.get("cliente_placa"),
-                cliente_conductor_telefono=datos.get("cliente_conductor_celular"),
+                cliente_conductor_telefono=datos.get("cliente_conductor_celular"), # <--- Asegúrate de usar esta clave aquí
             )
 
             pdf_path = None
@@ -996,8 +1043,8 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     documento=datos.get("cliente_documento"),
                     placa=datos.get("cliente_placa"),
                     conductor=datos.get("cliente_conductor"),
-                    id_conductor=datos.get("cliente_conductor_id"),
-                    celular_conductor=datos.get("cliente_conductor_telefono"),
+                    id_conductor=datos.get("cliente_conductor_id"),       # Pasando la cédula del conductor
+                    celular_conductor=datos.get("cliente_conductor_telefono"), # Pasando el celular del conductor
                     celular=datos.get("cliente_celular"),
                     items=datos.get("items", []),
                     numero_remision=r.get("numero_remision", "SIN-NUMERO"),
@@ -1053,6 +1100,7 @@ async def procesar_webhook(data: Dict[str, Any]) -> None:
                 await procesar_un_mensaje(message, value.get("contacts", []))
 
 
+# Endpoints HTTP / Webhook API
 @app.get("/")
 def raiz() -> Dict[str, str]:
     return {"status": "ok"}
@@ -1093,7 +1141,6 @@ async def verificar_webhook(request: Request) -> Response:
         return Response(p.get("hub.challenge", ""), media_type="text/plain")
     logger.warning("❌ Validación fallida - Token inválido o modo incorrecto")
     return Response("Token inválido", status_code=403)
-
 
 @app.post("/webhook")
 async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) -> Response:
@@ -1146,7 +1193,6 @@ async def descargar_documento(nombre_archivo: str) -> Response:
         logger.error(f"❌ Error descargando archivo: {e}")
         return Response("Error descargando archivo", status_code=500)
 
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
