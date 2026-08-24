@@ -763,6 +763,19 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
     if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
+        await enviar_botones_whatsapp(
+            telefono, 
+            "¿Qué deseas consultar en el inventario?", 
+            [
+                ("inv_total", "Inventario total"), 
+                ("inv_movs", "Ver movimientos"), 
+                ("inv_hoy", "Reporte de hoy")
+            ]
+        )
+        return
+
+    # 👇 MANEJADORES DE LOS 3 NUEVOS SUB-BOTONES
+    if texto_normalizado == "inv_total":
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
             await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
@@ -773,6 +786,19 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos_ordenados]
             lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
             await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
+        return
+
+    if texto_normalizado == "inv_movs":
+        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+        return
+
+    if texto_normalizado == "inv_hoy":
+        reporte = await asyncio.to_thread(
+            inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
+        )
+        await enviar_mensaje_whatsapp(telefono, reporte)
         return
 
     # 👇 BLOQUE OBLIGATORIO PARA CAPTURAR "MOVIMIENTOS" AL VUELO
