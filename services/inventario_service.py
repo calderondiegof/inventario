@@ -544,7 +544,28 @@ class InventarioServiceConValidacion:
 
         
     def generar_numero_remision(self) -> str:
-        return self.supabase.rpc("obtener_siguiente_numero_remision", {}).execute().data
+        """Calcula el número de la siguiente remisión revisando el último número
+        realmente creado en la tabla 'remisiones' y generando 'último + 1'.
+
+        A diferencia del RPC (que deja huecos, p. ej. porque simplemente suma 1
+        al total de filas o usa una secuencia), aquí se toma el último número
+        real existente y se devuelve el consecutivo siguiente sin dejar vacíos.
+        """
+        filas = self.supabase.table("remisiones").select("numero").execute() or []
+        datos = filas.data if hasattr(filas, "data") else filas
+        maximo = 0
+        for fila in (datos or []):
+            numero_txt = (fila.get("numero") or "").strip()
+            # Se extrae el sufijo numérico final (ej. de "REM_112" -> 112).
+            match = re.search(r"(\d+)\s*$", numero_txt)
+            if match:
+                valor = int(match.group(1))
+                if valor > maximo:
+                    maximo = valor
+        siguiente = maximo + 1
+        # Se conserva el ancho actual (mínimo 3 dígitos), ampliándolo si hace falta.
+        ancho = max(3, len(str(maximo)))
+        return f"REM_{str(siguiente).zfill(ancho)}"
 
     def registrar_remision(self, *, numero: str, lote_operacion_id: str, cliente_id: int, 
                            bodega_id: int, fecha_operacion: str,

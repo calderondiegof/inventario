@@ -63,6 +63,11 @@ else:
 
 http_client: Optional[httpx.AsyncClient] = None
 BOGOTA = ZoneInfo("America/Bogota")
+# Conjunto de IDs de mensajes de WhatsApp ya procesados.
+# Meta puede reintentar/reentregar un mismo webhook; esta deduplicación
+# evita que el bot responda (y envíe WhatsApp) varias veces por un mismo mensaje.
+_mensajes_whatsapp_procesados: set = set()
+_MAX_MENSAJES_PROCESADOS = 5000
 
 # Expresiones regulares y utilidades
 LINEA_MATERIAL_CANTIDAD = re.compile(r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE)
@@ -1113,6 +1118,15 @@ async def procesar_webhook(data: Dict[str, Any]) -> None:
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for message in value.get("messages", []):
+                mensaje_id = message.get("id")
+                if mensaje_id:
+                    if mensaje_id in _mensajes_whatsapp_procesados:
+                        logger.info(f"⏭️ Mensaje {mensaje_id} ya procesado; se omite para evitar envíos duplicados.")
+                        continue
+                    _mensajes_whatsapp_procesados.add(mensaje_id)
+                    # Evitar que el conjunto crezca sin límite en procesos largos.
+                    if len(_mensajes_whatsapp_procesados) > _MAX_MENSAJES_PROCESADOS:
+                        _mensajes_whatsapp_procesados.clear()
                 logger.info(f"📨 Mensaje nuevo: {message}")
                 await procesar_un_mensaje(message, value.get("contacts", []))
 
@@ -1166,15 +1180,19 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) 
     logger.info(f"📨 POST /webhook - Recibido webhook")
     logger.info(f"Firma recibida: {firma[:30] if firma else '(vacía)'}...")
     logger.info(f"Cuerpo: {cuerpo[:300]}...")
-    if META_APP_SECRET:
-        esperada = "sha256=" + hmac.new(META_APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
-        logger.info(f"Validando firma - Esperada: {esperada[:30]}...")
-        if not hmac.compare_digest(firma, esperada):
-            logger.warning("❌ Firma inválida")
-            return Response("Firma inválida", status_code=403)
-        logger.info("✅ Firma validada")
-    else:
-        logger.warning("⚠️ META_APP_SECRET no configurado - Procesando sin validar firma")
+    if not META_APP_SECRET:
+        # Sin app secret configurado NO se procesa ningún evento: si se aceptara,
+        # cualquier POST a esta URL pública podría hacer que el bot enviara
+        # mensajes de WhatsApp por sí solo. Es más seguro rechazarlo.
+        logger.warning("❌ META_APP_SECRET no configurado: se rechaza el webhook (no se procesa).")
+        logger.warning("   El bot NO enviará mensajes de WhatsApp sin firma válida de Meta.")
+        return Response("Firma no configurada", status_code=403)
+    esperada = "sha256=" + hmac.new(META_APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+    logger.info(f"Validando firma - Esperada: {esperada[:30]}...")
+    if not hmac.compare_digest(firma, esperada):
+        logger.warning("❌ Firma inválida: se rechaza el evento y NO se envía ningún mensaje.")
+        return Response("Firma inválida", status_code=403)
+    logger.info("✅ Firma validada")
 
     try:
         datos = json.loads(cuerpo)
