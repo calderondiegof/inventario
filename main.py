@@ -248,7 +248,7 @@ async def verificar_webhook(request: Request):
     if mode == "subscribe" and token == VERIFY_TOKEN:
         logger.info("✅ Webhook de Meta verificado correctamente")
         return Response(content=challenge, media_type="text/plain", status_code=200)
-
+    else
         logger.error("❌ Fallo en la verificación del webhook de Meta")
         return Response(content="Error de verificación", status_code=403)
 
