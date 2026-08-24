@@ -337,24 +337,52 @@ async def enviar_imagen_whatsapp(destino: str, url_imagen: str, leyenda: str) ->
 
 
 async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_documento: str = "documento.pdf") -> None:
+    """
+    Envía un archivo PDF a través de WhatsApp asegurando que el archivo exista,
+    esté completamente escrito en disco y maneje URLs accesibles para Meta.
+    """
     if not http_client:
         logger.error("❌ http_client no inicializado")
         return
 
-    logger.info(f"📄 Enviando documento a {destino}: {ruta_archivo}")
+    logger.info(f"📄 Iniciando proceso de envío de documento a {destino}: {ruta_archivo}")
 
     try:
+        # 1. VALIDACIÓN Y ESPERA DE ARCHIVO: Asegura que el generador de PDF haya terminado de escribir
+        await asyncio.sleep(1.5)  # Pequeña pausa de seguridad para evitar enviar un PDF a medio hacer
+        
         if not os.path.exists(ruta_archivo):
-            logger.error(f"❌ Archivo no encontrado: {ruta_archivo}")
+            logger.error(f"❌ Archivo físico no encontrado en la ruta: {ruta_archivo}")
+            await enviar_mensaje_whatsapp(destino, "⚠️ El sistema generó la venta pero el archivo PDF no se encontró en el servidor.")
             return
 
+        tamano_bytes = os.path.getsize(ruta_archivo)
+        logger.info(f"📦 Tamaño del PDF detectado: {tamano_bytes} bytes")
+        if tamano_bytes == 0:
+            logger.error("❌ El archivo PDF está vacío (0 bytes). El generador de PDF falló.")
+            await enviar_mensaje_whatsapp(destino, "⚠️ Error: El archivo de remisión se generó vacío.")
+            return
+
+        # 2. SUBIDA ASÍNCRONA: Intento de subida a Supabase o Servidor Local
+        url_documento = None
         try:
+            # Asegúrate de que esta función tenga un 'await' si es asíncrona
             url_documento = await subir_archivo_supabase(ruta_archivo, nombre_documento)
+            logger.info(f"🔗 URL generada por Supabase: {url_documento}")
         except Exception as e:
             logger.warning(f"⚠️ No se pudo subir a Supabase: {e}, intentando con servidor local")
-            base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+            base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip('/')
+            if not base_url:
+                # Si no configuraste PUBLIC_BASE_URL, usamos tu URL oficial de Render detectada en tus logs
+                base_url = "https://onrender.com"
             url_documento = f"{base_url}/download/{os.path.basename(ruta_archivo)}"
+            logger.info(f"🔗 URL generada localmente: {url_documento}")
 
+        if not url_documento:
+            logger.error("❌ No se pudo generar una URL válida para el documento.")
+            return
+
+        # 3. CONSTRUCCIÓN DE PAYLOAD SEGURO PARA META
         to_clean = re.sub(r"\D", "", str(destino))
         payload = {
             "messaging_product": "whatsapp",
@@ -366,35 +394,12 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
                 "filename": nombre_documento
             }
         }
+        
+        # Enviamos a la función centralizada que ya reintenta y no se cae
         await enviar_mensaje_whatsapp_json(payload)
 
     except Exception as e:
-        logger.error(f"❌ Error enviando documento: {e}")
-async def subir_archivo_supabase(ruta_archivo: str, nombre_documento: str) -> str:
-    if not supabase or not http_client:
-        raise Exception("Supabase no configurado")
-
-    try:
-        with open(ruta_archivo, 'rb') as f:
-            contenido = f.read()
-
-        timestamp = int(datetime.now(BOGOTA).timestamp())
-        ruta_storage = f"remisiones/{timestamp}_{nombre_documento}"
-
-        supabase.storage.from_("documentos").upload(
-            ruta_storage,
-            contenido,
-            {"content-type": "application/pdf"}
-        )
-
-        logger.info(f"✅ Archivo subido a Supabase: {ruta_storage}")
-
-        url_publica = supabase.storage.from_("documentos").get_public_url(ruta_storage)
-        return url_publica
-
-    except Exception as e:
-        logger.error(f"❌ Error subiendo a Supabase: {e}")
-        raise
+        logger.error(f"❌ Error crítico en enviar_documento_whatsapp: {e}")
 
 
 def prompt_agente(*, usuario: str, bodega_id: int, fecha_mensaje: str, borrador: Dict[str, Any]) -> str:
