@@ -366,15 +366,15 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
         # 2. SUBIDA ASÍNCRONA: Intento de subida a Supabase o Servidor Local
         url_documento = None
         try:
-            # Asegúrate de que esta función tenga un 'await' si es asíncrona
+            # Llama a la función que corrige las URLs públicas y los MIME Types de Supabase
             url_documento = await subir_archivo_supabase(ruta_archivo, nombre_documento)
             logger.info(f"🔗 URL generada por Supabase: {url_documento}")
         except Exception as e:
             logger.warning(f"⚠️ No se pudo subir a Supabase: {e}, intentando con servidor local")
             base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip('/')
             if not base_url:
-                # Si no configuraste PUBLIC_BASE_URL, usamos tu URL oficial de Render detectada en tus logs
-                base_url = "https://onrender.com"
+                # Tu URL real de Render para el respaldo local de descargas
+                base_url = "https://inventario-qcza.onrender.com"
             url_documento = f"{base_url}/download/{os.path.basename(ruta_archivo)}"
             logger.info(f"🔗 URL generada localmente: {url_documento}")
 
@@ -395,11 +395,12 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
             }
         }
         
-        # Enviamos a la función centralizada que ya reintenta y no se cae
+        # Envía a la función centralizada única que ya reintenta y no se cae
         await enviar_mensaje_whatsapp_json(payload)
 
     except Exception as e:
         logger.error(f"❌ Error crítico en enviar_documento_whatsapp: {e}")
+
 
 
 def prompt_agente(*, usuario: str, bodega_id: int, fecha_mensaje: str, borrador: Dict[str, Any]) -> str:
