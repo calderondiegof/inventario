@@ -325,8 +325,9 @@ async def enviar_botones_whatsapp(destino: str, texto: str, opciones: List[tuple
 
 async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_documento: str = "documento.pdf") -> None:
     """
-    Función definitiva optimizada: Valida el archivo en disco, genera la estructura 
-    pública e impacta de forma segura en Supabase Storage sin perder la conexión.
+    Función unificada y definitiva. Fuerza la generación o validación del archivo en disco,
+    utiliza un pool aislado de hilos para inyectar el binario en Supabase Storage con su
+    MIME type correcto y despacha el payload limpio a la API de Meta.
     """
     if not http_client:
         logger.error("❌ http_client no inicializado")
@@ -335,64 +336,72 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
     logger.info(f"📄 Iniciando proceso de envío de documento a {destino}: {ruta_archivo}")
 
     try:
-        # 1. Validación del archivo en disco de Render
-        await asyncio.sleep(2.0)
+        # 1. Jugada de Seguridad: Esperar de forma asíncrona a que el sistema operativo libere el descriptor de archivo
+        await asyncio.sleep(2.5)
         
+        # Validación estricta de existencia en el sistema de archivos de Render
         if not os.path.exists(ruta_archivo):
-            logger.error(f"❌ Archivo físico no encontrado en la ruta: {ruta_archivo}")
+            logger.error(f"❌ El archivo físico no existe en la ruta provista: {ruta_archivo}. El generador de PDF falló o no ha terminado.")
+            await enviar_mensaje_whatsapp(destino, "⚠️ Error: El archivo PDF de la remisión no se pudo localizar en el servidor.")
             return
 
         tamano_bytes = os.path.getsize(ruta_archivo)
-        logger.info(f"📦 Tamaño del PDF detectado en disco: {tamano_bytes} bytes")
+        logger.info(f"📦 Tamaño del PDF verificado en disco: {tamano_bytes} bytes")
         if tamano_bytes == 0:
-            logger.error("❌ El archivo PDF está vacío (0 bytes).")
+            logger.error("❌ Archivo corrupto detectado en disco (0 bytes). Cierre de escritura inválido.")
+            await enviar_mensaje_whatsapp(destino, "⚠️ Error: El archivo de remisión se generó vacío (0 KB).")
             return
 
         bucket_name = "remisiones"
         nombre_remoto = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{nombre_documento}"
         url_documento = None
 
-        # 2. Subida Síncrona Directa y Controlada a Supabase
+        # 2. Transferencia Física Atómica a Supabase Storage via Executor
         if supabase:
             try:
-                logger.info(f"⏳ Ejecutando subida física a Supabase Storage: {nombre_remoto}...")
+                logger.info(f"⏳ Ejecutando subida física aislada a Supabase Storage: {nombre_remoto}...")
                 
-                with open(ruta_archivo, "rb") as f:
-                    file_data = f.read()
+                # Función interna pura para aislar el contexto de red bloqueante del SDK de Supabase
+                def _subir_proceso_bloqueante():
+                    with open(ruta_archivo, "rb") as f:
+                        bytes_datos = f.read()
+                    
+                    # Forzado estricto del encabezado HTTP Content-Type para evitar la mutación a .html
+                    opciones_storage = {
+                        "content-type": "application/pdf", 
+                        "upsert": "true"
+                    }
+                    
+                    return supabase.storage.from_(bucket_name).upload(
+                        path=nombre_remoto,
+                        file=bytes_datos,
+                        file_options=opciones_storage
+                    )
 
-                # Forzamos tipo MIME application/pdf
-                options = {
-                    "content-type": "application/pdf", 
-                    "upsert": "true"
-                }
-
-                # Ejecución directa en el hilo principal para asegurar la persistencia en la nube
-                supabase.storage.from_(bucket_name).upload(
-                    path=nombre_remoto,
-                    file=file_data,
-                    file_options=options
-                )
-                
+                # Transferencia en el pool de hilos de la CPU para evitar interrupciones en el bucle de eventos de FastAPI
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _subir_proceso_bloqueante)
                 logger.info(f"✅ ¡Confirmado! Archivo guardado físicamente en Supabase.")
 
-                # Generación de la URL pública oficial de descarga
+                # Construcción estricta de la URL pública directa
                 res_url = supabase.storage.from_(bucket_name).get_public_url(nombre_remoto)
                 url_documento = res_url if isinstance(res_url, str) else getattr(res_url, "public_url", str(res_url))
                 logger.info(f"🔗 URL Pública generada por Supabase Storage: {url_documento}")
 
             except Exception as storage_err:
-                logger.error(f"❌ Falló la subida física al Storage de Supabase: {storage_err}")
+                logger.error(f"❌ Error crítico en la transferencia de red a Supabase Storage: {storage_err}")
                 url_documento = None
 
-        # 3. Ruta de respaldo local (Asegurando tu URL real de Render en producción)
+        # 3. Plan de Contingencia: Servidor Local de Render
         if not url_documento:
-            logger.warning("⚠️ Utilizando servidor local de Render como ruta de respaldo para la descarga")
+            logger.warning("⚠️ Plan de respaldo activado: Sirviendo archivo desde el almacenamiento local de Render")
             base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip('/')
             if not base_url:
                 base_url = "https://inventario-qcza.onrender.com"
             url_documento = f"{base_url}/download/{os.path.basename(ruta_archivo)}"
+            logger.info(f"🔗 URL local alternativa generada: {url_documento}")
 
-        # 4. Envío de datos a Meta API
+        # 4. Despacho del Payload a Meta API
         to_clean = re.sub(r"\D", "", str(destino))
         payload = {
             "messaging_product": "whatsapp",
@@ -408,9 +417,8 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
         await enviar_mensaje_whatsapp_json(payload)
 
     except Exception as e:
-        logger.error(f"❌ Error crítico en enviar_documento_whatsapp: {e}")
-
-
+        logger.error(f"❌ Error general en cascada dentro de enviar_documento_whatsapp: {e}")
+        
 def prompt_agente(*, usuario: str, bodega_id: int, fecha_mensaje: str, borrador: Dict[str, Any]) -> str:
     materiales = [
         {"nombre": x.nombre, "tipo": x.tipo_material, "comercializable": x.es_comercializable}
