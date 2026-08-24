@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import uvicorn
 import tempfile
 import re
 from contextlib import asynccontextmanager
