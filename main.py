@@ -245,6 +245,81 @@ def fecha_local_mensaje(message: Dict[str, Any]) -> str:
         return datetime.fromtimestamp(int(marca), tz=BOGOTA).date().isoformat()
     return datetime.now(BOGOTA).date().isoformat()
 
+
+# =====================================================================
+# HELPERS REUTILIZABLES
+# =====================================================================
+
+def _telefono_limpio(destino: str) -> str:
+    """Deja solo los dígitos del número, como espera la API de WhatsApp."""
+    return re.sub(r"\D", "", str(destino))
+
+
+def _payload_base_whatsapp(destino: str, tipo: str) -> dict:
+    """Base común de todos los payloads de la API de WhatsApp."""
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": _telefono_limpio(destino),
+        "type": tipo,
+    }
+
+
+# Sub-botones del menú de consulta de inventario
+SUB_MENU_INVENTARIO = [
+    ("inv_total", "Inventario total"),
+    ("inv_movs", "Ver movimientos"),
+    ("inv_hoy", "Reporte de hoy"),
+]
+
+
+async def enviar_reporte_diario(telefono: str, bodega_id: int, message: Dict[str, Any], dias_atras: int = 0) -> None:
+    """Envía el reporte diario de la bodega. dias_atras=0 → 'hoy', 1 → 'ayer'."""
+    fecha = fecha_local_mensaje(message)
+    if dias_atras:
+        fecha = (datetime.fromisoformat(fecha).date() - timedelta(days=dias_atras)).isoformat()
+    reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha)
+    await enviar_mensaje_whatsapp(telefono, reporte)
+
+
+async def enviar_inventario_total(telefono: str, bodega_id: int) -> None:
+    """Envía el resumen con todos los saldos de la bodega, ordenados de mayor a menor."""
+    saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
+    if not saldos:
+        await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
+        return
+    saldos_ordenados = sorted(saldos, key=lambda x: x["saldo_kg"], reverse=True)
+    total_kg = sum(x["saldo_kg"] for x in saldos_ordenados)
+    lineas = [f"📦 Inventario actual — Bodega #{bodega_id}", ""]
+    lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos_ordenados]
+    lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
+    await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
+
+
+async def pedir_movimientos_material(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
+    """Activa el flujo interactivo para consultar movimientos de un material."""
+    contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+    contexto["borrador_pendiente"] = {}
+    contexto["campo_esperado"] = None
+    await guardar_contexto(usuario_id, contexto)
+    await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+
+
+async def inferir_datos_ia(usuario: Dict[str, Any], bodega_id: int, fecha_mensaje: str,
+                           borrador: Dict[str, Any], texto: str) -> Optional[Dict[str, Any]]:
+    """Pregunta al agente (DeepSeek) que interprete el mensaje y lo fusiona con el borrador.
+    Devuelve None si la interpretación falló."""
+    try:
+        ai = await llamar_deepseek(
+            prompt_agente(usuario=usuario["nombre"], bodega_id=bodega_id,
+                          fecha_mensaje=fecha_mensaje, borrador=borrador),
+            texto,
+        )
+    except Exception:
+        return None
+    return fusionar_borrador(borrador, ai)
+
+
 # =====================================================================
 # FUNCIÓN CENTRALIZADA ÚNICA PARA WHATSAPP (SOLUCIÓN DEFINITIVA)
 # =====================================================================
@@ -296,42 +371,24 @@ async def enviar_mensaje_whatsapp_json(payload: dict) -> None:
         logger.error(f"⚠️ Error inesperado controlado en el envío de WhatsApp: {e}")
 
 async def enviar_mensaje_whatsapp(destino: str, texto: str) -> None:
-    to_clean = re.sub(r"\D", "", str(destino))
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to_clean,
-        "type": "text",
-        "text": {"body": str(texto)[:4096]}
-    }
+    payload = _payload_base_whatsapp(destino, "text")
+    payload["text"] = {"body": str(texto)[:4096]}
     await enviar_mensaje_whatsapp_json(payload)
 
 
 async def enviar_botones_whatsapp(destino: str, texto: str, opciones: List[tuple]) -> None:
-    to_clean = re.sub(r"\D", "", str(destino))
     botones = [{"type": "reply", "reply": {"id": id_, "title": titulo[:20]}} for id_, titulo in opciones[:3]]
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to_clean,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": texto},
-            "action": {"buttons": botones},
-        },
+    payload = _payload_base_whatsapp(destino, "interactive")
+    payload["interactive"] = {
+        "type": "button",
+        "body": {"text": texto},
+        "action": {"buttons": botones},
     }
     await enviar_mensaje_whatsapp_json(payload)
 
 async def enviar_imagen_whatsapp(destino: str, url_imagen: str, leyenda: str) -> None:
-    to_clean = re.sub(r"\D", "", str(destino))
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to_clean,
-        "type": "image",
-        "image": {"link": url_imagen, "caption": leyenda}
-    }
+    payload = _payload_base_whatsapp(destino, "image")
+    payload["image"] = {"link": url_imagen, "caption": leyenda}
     await enviar_mensaje_whatsapp_json(payload)
 
 async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_documento: str = "documento.pdf") -> None:
@@ -353,16 +410,10 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
             base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
             url_documento = f"{base_url}/download/{os.path.basename(ruta_archivo)}"
 
-        to_clean = re.sub(r"\D", "", str(destino))
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to_clean,
-            "type": "document",
-            "document": {
-                "link": url_documento,
-                "filename": nombre_documento
-            }
+        payload = _payload_base_whatsapp(destino, "document")
+        payload["document"] = {
+            "link": url_documento,
+            "filename": nombre_documento,
         }
         await enviar_mensaje_whatsapp_json(payload)
 
@@ -518,7 +569,6 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
         return "Indica los materiales seleccionados o la cantidad de basura a descontar del Revuelto.", "items"
     
     # Máquina de estados estricta para VENTA_DESPACHO
-# Máquina de estados estricta para VENTA_DESPACHO
     if intento == "VENTA_DESPACHO":
         if not datos.get("cliente"):
             return "Indica el nombre del cliente, por favor.", "cliente"
@@ -689,20 +739,45 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     contexto["accion_pendiente"] = {}
                     respuesta_texto = "Operación cancelada."
                 else:
-                    material_encontrado = None
                     texto_buscado = texto.lower().strip()
-                    
-                    # Búsqueda flexible en el catálogo de materiales
-                    for mat in inventario.catalogo_materiales.values():
-                        if texto_buscado in mat.nombre.lower():
-                            material_encontrado = mat
-                            break
-                    
-                    if not material_encontrado:
+
+                    # Se buscan TODOS los materiales cuyo nombre contenga lo escrito;
+                    # así, si hay varias coincidencias, no se adivina: se confirma.
+                    coincidencias = [
+                        mat for mat in inventario.catalogo_materiales.values()
+                        if texto_buscado in mat.nombre.lower()
+                    ]
+
+                    # Sin coincidencias por subcadena: se intenta el buscador
+                    # exacto/tolerante por si fue un error de tipeo o un sinónimo.
+                    if not coincidencias:
                         try:
-                            material_encontrado = inventario.obtener_material_por_nombre(texto)
+                            posible = inventario.obtener_material_por_nombre(texto)
+                            coincidencias = [posible] if posible else []
                         except Exception:
-                            pass
+                            coincidencias = []
+
+                    if len(coincidencias) == 1:
+                        material_encontrado = coincidencias[0]
+                    elif len(coincidencias) > 1:
+                        # AMBIGUO: se pide al usuario que confirme con el número
+                        # o el nombre exacto de la lista.
+                        nombre_unicos = list(dict.fromkeys(m.nombre for m in coincidencias))
+                        contexto["accion_pendiente"] = {
+                            "tipo": "confirmar_material",
+                            "candidatos": nombre_unicos,
+                            "texto_buscado": texto,
+                        }
+                        await guardar_contexto(usuario_id, contexto)
+                        lista = "\n".join(f"{i+1}. {n}" for i, n in enumerate(nombre_unicos))
+                        await enviar_mensaje_whatsapp(
+                            telefono,
+                            f"Varios materiales coinciden con '{texto}'. "
+                            f"Escribe el número del que quieres o el nombre exacto:\n\n{lista}",
+                        )
+                        return
+                    else:
+                        material_encontrado = None
 
                     if not material_encontrado:
                         respuesta_texto = f"No encontré el material '{texto}'. Intenta de nuevo o escribe *cancelar*."
@@ -715,6 +790,37 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                             [("todo", "Todo el historial"), ("rango", "Elegir fechas")],
                         )
                         return
+            elif accion["tipo"] == "confirmar_material":
+                candidatos = accion.get("candidatos", [])
+                eleccion = texto.strip().lower()
+                elegido = None
+                if eleccion.isdigit():
+                    idx = int(eleccion) - 1
+                    if 0 <= idx < len(candidatos):
+                        elegido = candidatos[idx]
+                else:
+                    # Coincidencia por nombre exacto dentro de la lista ofrecida.
+                    for c in candidatos:
+                        if c.lower() == eleccion:
+                            elegido = c
+                            break
+                    if not elegido:
+                        try:
+                            mat = inventario.obtener_material_por_nombre(texto)
+                            if mat and mat.nombre in candidatos:
+                                elegido = mat.nombre
+                        except Exception:
+                            pass
+                if elegido:
+                    contexto["accion_pendiente"] = {"tipo": "movimientos_rango", "material": elegido}
+                    await guardar_contexto(usuario_id, contexto)
+                    await enviar_botones_whatsapp(
+                        telefono, f"¿Qué rango de fechas quieres ver para {elegido}?",
+                        [("todo", "Todo el historial"), ("rango", "Elegir fechas")],
+                    )
+                    return
+                lista = "\n".join(f"{i+1}. {n}" for i, n in enumerate(candidatos))
+                respuesta_texto = f"No reconocí '{texto}'. Escribe el número o el nombre exacto:\n\n{lista}"
             elif accion["tipo"] == "movimientos_rango":
                 eleccion = texto.strip().lower()
                 if eleccion in {"todo", "1"}:
@@ -774,15 +880,10 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
     texto_normalizado = texto.lower().strip()
     if texto_normalizado in {"reporte de hoy", "reporte hoy", "ver reporte de hoy"}:
-        reporte = await asyncio.to_thread(
-            inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
-        )
-        await enviar_mensaje_whatsapp(telefono, reporte)
+        await enviar_reporte_diario(telefono, bodega_id, message)
         return
     if texto_normalizado in {"reporte de ayer", "reporte ayer", "ver reporte de ayer"}:
-        fecha_ayer = (datetime.fromisoformat(fecha_local_mensaje(message)).date() - timedelta(days=1)).isoformat()
-        reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha_ayer)
-        await enviar_mensaje_whatsapp(telefono, reporte)
+        await enviar_reporte_diario(telefono, bodega_id, message, dias_atras=1)
         return
         
 
@@ -791,60 +892,27 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         contexto["borrador_pendiente"] = {}
         contexto["campo_esperado"] = None
         await guardar_contexto(usuario_id, contexto)
-        await enviar_botones_whatsapp(
-            telefono, 
-            "¿Qué deseas consultar en el inventario?", 
-            [
-                ("inv_total", "Inventario total"), 
-                ("inv_movs", "Ver movimientos"), 
-                ("inv_hoy", "Reporte de hoy")
-            ]
-        )
+        await enviar_botones_whatsapp(telefono, "¿Qué deseas consultar en el inventario?", SUB_MENU_INVENTARIO)
         return
 
     # 2. Sub-botón: Inventario total
     if texto_normalizado == "inv_total":
-        saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
-        if not saldos:
-            await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
-        else:
-            saldos_ordenados = sorted(saldos, key=lambda x: x["saldo_kg"], reverse=True)
-            total_kg = sum(x["saldo_kg"] for x in saldos_ordenados)
-            lineas = [f"📦 Inventario actual — Bodega #{bodega_id}", ""]
-            lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos_ordenados]
-            lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
-            await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
+        await enviar_inventario_total(telefono, bodega_id)
         return
 
     # 3. Sub-botón: Ver movimientos
     if texto_normalizado == "inv_movs":
-        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+        await pedir_movimientos_material(telefono, usuario_id, contexto)
         return
 
     # 4. Sub-botón: Reporte de hoy
     if texto_normalizado == "inv_hoy":
-        reporte = await asyncio.to_thread(
-            inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
-        )
-        await enviar_mensaje_whatsapp(telefono, reporte)
+        await enviar_reporte_diario(telefono, bodega_id, message)
         return
 
-    # 5. Acceso directo por texto para movimientos
-    if texto_normalizado in {"movimientos", "ver movimientos", "historial"}:
-        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
-        return
-        
-    # 👇 BLOQUE OBLIGATORIO PARA CAPTURAR "MOVIMIENTOS" AL VUELO
-    if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "movimientos material"}:
-        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+    # Acceso directo por texto para movimientos
+    if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "historial", "movimientos material"}:
+        await pedir_movimientos_material(telefono, usuario_id, contexto)
         return
 
     # Opciones de Menú
@@ -861,19 +929,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             "Selecciona el tipo de movimiento a registrar:",
             submenu_ingreso
         )
-        return
-
-    elif texto in {"2", "Ver Inventario"}:
-        saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
-        if not saldos:
-            await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
-        else:
-            saldos_ordenados = sorted(saldos, key=lambda x: x["saldo_kg"], reverse=True)
-            total_kg = sum(x["saldo_kg"] for x in saldos_ordenados)
-            lineas = [f"📦 Inventario actual — Bodega #{bodega_id}", ""]
-            lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos_ordenados]
-            lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
-            await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
         return
 
     elif texto in {"3", "Anular Inventario"}:
@@ -896,63 +951,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         datos.update(parsear_campos_cliente_venta(texto))
     elif campo_esperado == "conductor_datos":
         datos = dict(borrador_anterior)
-        campos_extraidos = parsear_campos_cliente_venta(texto)
-        
-        for clave, valor in campos_extraidos.items():
-            if valor:
-                datos[clave] = valor
-            
-        # Respaldo por posiciones si no vinieron etiquetados
-        if not datos.get("cliente_conductor") or not datos.get("cliente_conductor_id") or not datos.get("cliente_placa") or not datos.get("cliente_conductor_celular"):
-            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
-            if len(partes) >= 4:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-                if not datos.get("cliente_conductor_celular"): datos["cliente_conductor_celular"] = partes[3]
-            elif len(partes) == 3:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-            elif len(partes) == 2:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[1]
-            elif len(partes) == 1 and not datos.get("cliente_conductor"):
-                datos["cliente_conductor"] = partes[0]
-        
-        # Actualizamos todos los campos extraídos por el parser sin dejar ninguno fuera
-        for clave, valor in campos_extraidos.items():
-            if valor:
-                datos[clave] = valor
-            
-        # Respaldo por si el parser no atrapó las posiciones automáticamente
-        if not datos.get("cliente_conductor") or not datos.get("cliente_conductor_id") or not datos.get("cliente_placa") or not datos.get("cliente_celular"):
-            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
-            if len(partes) >= 4:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-                if not datos.get("cliente_celular"): datos["cliente_celular"] = partes[3]
-            elif len(partes) == 3:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-            elif len(partes) == 2:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[1]
-            elif len(partes) == 1 and not datos.get("cliente_conductor"):
-                datos["cliente_conductor"] = partes[0]
-            
-        # Respaldo por si el parser estricto no atrapó ambos componentes
-        if not datos.get("cliente_conductor") or not datos.get("cliente_placa"):
-            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
-            if len(partes) >= 2:
-                datos["cliente_conductor"] = partes[0]
-                datos["cliente_placa"] = partes[1]
-            elif len(partes) == 1 and not datos.get("cliente_conductor"):
-                datos["cliente_conductor"] = partes[0]
-            elif len(partes) == 1 and not datos.get("cliente_placa"):
-                datos["cliente_placa"] = partes[0]
+        datos.update(parsear_campos_cliente_venta(texto))
     elif campo_esperado in {"tipo_movimiento", "menu_ingreso"}:
         datos = dict(borrador_anterior)
         eleccion = texto.strip().lower()
@@ -974,19 +973,12 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                 return
             datos["fecha_operacion"] = fecha_parseada
         else:
-            try:
-                ai = await llamar_deepseek(prompt_agente(usuario=usuario["nombre"], bodega_id=bodega_id, fecha_mensaje=fecha_mensaje, borrador=borrador_anterior), texto)
-            except Exception:
-                await enviar_mensaje_whatsapp(telefono, "No pude interpretar el mensaje. Inténtalo nuevamente.")
-                return
-            datos = fusionar_borrador(borrador_anterior, ai)
+            datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
     else:
-        try:
-            ai = await llamar_deepseek(prompt_agente(usuario=usuario["nombre"], bodega_id=bodega_id, fecha_mensaje=fecha_mensaje, borrador=borrador_anterior), texto)
-        except Exception:
-            await enviar_mensaje_whatsapp(telefono, "No pude interpretar el mensaje. Inténtalo nuevamente.")
-            return
-        datos = fusionar_borrador(borrador_anterior, ai)
+        datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
+    if datos is None:
+        await enviar_mensaje_whatsapp(telefono, "No pude interpretar el mensaje. Inténtalo nuevamente.")
+        return
 
     cliente_existente = None
     if datos.get("intencion") == "VENTA_DESPACHO" and datos.get("cliente"):
@@ -1103,7 +1095,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             
             await enviar_botones_whatsapp(
                 destino=telefono,
-                texto=ai.respuesta_texto or "¿Qué operación deseas registrar?",
+                texto=datos.get("respuesta_texto") or "¿Qué operación deseas registrar?",
                 opciones=menu_principal
             )
             return
