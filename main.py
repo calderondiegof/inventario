@@ -763,9 +763,12 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
         
-# 1. Atrapamos el ID exacto cuando presionan el botón principal del menú
-    if texto_normalizado in {"ver_inventario", "ver inventario", "ver saldos", "saldos", "inventario"}:
-        # Si el usuario escribió o presionó la opción de ver inventario, desplegamos los 3 sub-botones
+
+# Despliegue estricto de sub-botones al presionar o escribir "Ver Inventario"
+    if texto_normalizado in {"ver_inventario", "ver inventario", "ver saldos", "saldos", "inventario", "2"}:
+        contexto["borrador_pendiente"] = {}
+        contexto["campo_esperado"] = None
+        await guardar_contexto(usuario_id, contexto)
         await enviar_botones_whatsapp(
             telefono, 
             "¿Qué deseas consultar en el inventario?", 
