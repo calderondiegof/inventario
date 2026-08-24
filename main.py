@@ -726,25 +726,35 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, "¿Cuál cliente deseas corregir? (nombre)")
         return
     if texto.lower() in {"ver grafico", "ver gráfico", "reporte visual"}:
+        contexto["borrador_pendiente"] = {}
+        contexto["campo_esperado"] = None
+        await guardar_contexto(usuario_id, contexto)
         url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)
-        if url:
-            await enviar_imagen_whatsapp(telefono, url, f"Inventario de la bodega {bodega_id}")
         else:
             await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
         return
     texto_normalizado = texto.lower().strip()
     if texto_normalizado in {"reporte de hoy", "reporte hoy", "ver reporte de hoy"}:
+        contexto["borrador_pendiente"] = {}
+        contexto["campo_esperado"] = None
+        await guardar_contexto(usuario_id, contexto)
         reporte = await asyncio.to_thread(
             inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
         )
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
     if texto_normalizado in {"reporte de ayer", "reporte ayer", "ver reporte de ayer"}:
+        contexto["borrador_pendiente"] = {}
+        contexto["campo_esperado"] = None
+        await guardar_contexto(usuario_id, contexto)
         fecha_ayer = (datetime.fromisoformat(fecha_local_mensaje(message)).date() - timedelta(days=1)).isoformat()
         reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha_ayer)
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
     if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
+        contexto["borrador_pendiente"] = {}
+        contexto["campo_esperado"] = None
+        await guardar_contexto(usuario_id, contexto)
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
             await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
