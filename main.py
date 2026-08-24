@@ -730,7 +730,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         contexto["campo_esperado"] = None
         await guardar_contexto(usuario_id, contexto)
         url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)
-        else:
+    else:
             await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
         return
     texto_normalizado = texto.lower().strip()
