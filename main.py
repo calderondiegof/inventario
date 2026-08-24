@@ -807,10 +807,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, "¿Qué remisión deseas anular o corregir? (ejemplo: REM_112)")
         return
         
-# === MANEJO DE MOVIMIENTOS DE MATERIALES ===
-    
+# Comandos Rápidos y Reportes (Ver gráfico, saldos, inventario...)
+    # ... (aquí están tus otros if de gráfico, inventario, etc.) ...
+
+    # ==========================================================
+    # 👇 PEGA ESTE BLOQUE EXACTAMENTE AQUÍ (ANTES DE LLAMAR A DEEPSEEK)
+    # ==========================================================
     if "movimiento" in texto_normalizado or "historial" in texto_normalizado:
-        # Extraer posible nombre de material (ej: "movimientos cobre" -> "cobre")
         partes = re.sub(r"(movimientos?|historial|de|ver|el|la)", "", texto_normalizado).strip()
         if partes:
             try:
@@ -825,7 +828,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
         return
 
-    # Si el bot estaba esperando que el usuario escriba el nombre del material para los movimientos:
     if accion.get("tipo") == "espera_material_movimiento":
         material_buscado = texto.strip()
         try:
@@ -838,6 +840,15 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, respuesta_texto)
         return
+    # ==========================================================
+
+    # Procesamiento normal con DeepSeek (si no es un comando rápido)
+    await asyncio.to_thread(inventario.recargar_catalogos)
+    fecha_mensaje = fecha_local_mensaje(message)
+    borrador_anterior = contexto.get("borrador_pendiente") or {}
+    campo_esperado = contexto.get("campo_esperado")
+    
+    # Resto de tu código hacia abajo...
     
     await asyncio.to_thread(inventario.recargar_catalogos)
     fecha_mensaje = fecha_local_mensaje(message)
