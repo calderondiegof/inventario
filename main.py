@@ -338,8 +338,8 @@ async def enviar_imagen_whatsapp(destino: str, url_imagen: str, leyenda: str) ->
 
 async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_documento: str = "documento.pdf") -> None:
     """
-    Envía un archivo PDF a través de WhatsApp asegurando que el archivo exista,
-    esté completamente escrito en disco y maneje URLs accesibles para Meta.
+    Envía un archivo PDF a través de WhatsApp. Realiza la subida física asíncrona 
+    a Supabase Storage forzando el tipo MIME para evitar archivos HTML corruptos.
     """
     if not http_client:
         logger.error("❌ http_client no inicializado")
@@ -348,8 +348,8 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
     logger.info(f"📄 Iniciando proceso de envío de documento a {destino}: {ruta_archivo}")
 
     try:
-        # 1. VALIDACIÓN Y ESPERA DE ARCHIVO: Asegura que el generador de PDF haya terminado de escribir
-        await asyncio.sleep(1.5)  # Pequeña pausa de seguridad para evitar enviar un PDF a medio hacer
+        # 1. VALIDACIÓN Y ESPERA DE ARCHIVO: Asegura el cierre de escritura en disco
+        await asyncio.sleep(1.5)
         
         if not os.path.exists(ruta_archivo):
             logger.error(f"❌ Archivo físico no encontrado en la ruta: {ruta_archivo}")
@@ -363,26 +363,55 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
             await enviar_mensaje_whatsapp(destino, "⚠️ Error: El archivo de remisión se generó vacío.")
             return
 
-        # 2. SUBIDA ASÍNCRONA: Intento de subida a Supabase o Servidor Local
+        # 2. SUBIDA INTEGRADA A SUPABASE STORAGE
         url_documento = None
-        try:
-            # Llama a la función que corrige las URLs públicas y los MIME Types de Supabase
-            url_documento = await subir_archivo_supabase(ruta_archivo, nombre_documento)
-            logger.info(f"🔗 URL generada por Supabase: {url_documento}")
-        except Exception as e:
-            logger.warning(f"⚠️ No se pudo subir a Supabase: {e}, intentando con servidor local")
+        bucket_name = "remisiones"
+        nombre_remoto = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{nombre_documento}"
+
+        if supabase:
+            try:
+                logger.info(f"⏳ Transfiriendo archivo físico a Supabase Storage: {nombre_remoto}...")
+                
+                with open(ruta_archivo, "rb") as f:
+                    file_data = f.read()
+
+                options = {
+                    "content-type": "application/pdf", 
+                    "upsert": "true"
+                }
+
+                # Ejecutamos la subida en un hilo seguro para garantizar que el archivo se guarde por completo
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, 
+                    lambda: supabase.storage.from_(bucket_name).upload(
+                        path=nombre_remoto,
+                        file=file_data,
+                        file_options=options
+                    )
+                )
+                
+                logger.info(f"✅ ¡Confirmado! Archivo guardado físicamente en Supabase.")
+
+                # Construcción y extracción de la URL 100% pública para Meta
+                res_url = supabase.storage.from_(bucket_name).get_public_url(nombre_remoto)
+                url_documento = res_url if isinstance(res_url, str) else getattr(res_url, "public_url", str(res_url))
+                logger.info(f"🔗 URL Pública generada por Supabase Storage: {url_documento}")
+
+            except Exception as storage_err:
+                logger.error(f"❌ Falló la subida física al Storage de Supabase: {storage_err}")
+                url_documento = None
+
+        # 3. RESPALDO LOCAL (Si Supabase no está configurado o falló la subida)
+        if not url_documento:
+            logger.warning("⚠️ Utilizando servidor local de Render como ruta de respaldo para la descarga")
             base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip('/')
             if not base_url:
-                # Tu URL real de Render para el respaldo local de descargas
                 base_url = "https://inventario-qcza.onrender.com"
             url_documento = f"{base_url}/download/{os.path.basename(ruta_archivo)}"
-            logger.info(f"🔗 URL generada localmente: {url_documento}")
+            logger.info(f"🔗 URL local alternativa: {url_documento}")
 
-        if not url_documento:
-            logger.error("❌ No se pudo generar una URL válida para el documento.")
-            return
-
-        # 3. CONSTRUCCIÓN DE PAYLOAD SEGURO PARA META
+        # 4. CONSTRUCCIÓN DE PAYLOAD SEGURO PARA META
         to_clean = re.sub(r"\D", "", str(destino))
         payload = {
             "messaging_product": "whatsapp",
@@ -395,13 +424,11 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
             }
         }
         
-        # Envía a la función centralizada única que ya reintenta y no se cae
+        # Enviamos a la función centralizada única que ya reintenta y no se cae
         await enviar_mensaje_whatsapp_json(payload)
 
     except Exception as e:
         logger.error(f"❌ Error crítico en enviar_documento_whatsapp: {e}")
-
-
 
 def prompt_agente(*, usuario: str, bodega_id: int, fecha_mensaje: str, borrador: Dict[str, Any]) -> str:
     materiales = [
