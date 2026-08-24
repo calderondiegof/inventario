@@ -662,33 +662,40 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     await asyncio.to_thread(inventario.actualizar_cliente, accion["cliente_id"], campos)
                     respuesta_texto = f"Datos de {accion['cliente_nombre']} actualizados."
                     contexto["accion_pendiente"] = {}
-            elif accion["tipo"] == "movimientos_material":
-                material_encontrado = None
-                texto_buscado = texto.lower().strip()
-                
-                # Búsqueda flexible por coincidencia parcial en el catálogo
-                for mat in inventario.catalogo_materiales.values():
-                    if texto_buscado in mat.nombre.lower():
-                        material_encontrado = mat
-                        break
-                
-                if not material_encontrado:
-                    try:
-                        material_encontrado = inventario.obtener_material_por_nombre(texto)
-                    except Exception:
-                        pass
-
-                if not material_encontrado:
-                    respuesta_texto = f"No encontré el material '{texto}'. Por favor, escribe el nombre del material de nuevo:"
-                    contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-                else:
-                    contexto["accion_pendiente"] = {"tipo": "movimientos_rango", "material": material_encontrado.nombre}
+                elif accion["tipo"] == "movimientos_material":
+                if texto.lower().strip() in {"cancelar", "salir", "menu"}:
+                    contexto["accion_pendiente"] = {}
                     await guardar_contexto(usuario_id, contexto)
-                    await enviar_botones_whatsapp(
-                        telefono, f"¿Qué rango de fechas quieres ver para {material_encontrado.nombre}?",
-                        [("todo", "Todo el historial"), ("rango", "Elegir fechas")],
-                    )
-                    return
+                    respuesta_texto = "Operación cancelada."
+                else:
+                    material_encontrado = None
+                    texto_buscado = texto.lower().strip()
+                    
+                    # Búsqueda flexible en el catálogo de materiales
+                    for mat in inventario.catalogo_materiales.values():
+                        if texto_buscado in mat.nombre.lower():
+                            material_encontrado = mat
+                            break
+                    
+                    if not material_encontrado:
+                        try:
+                            material_encontrado = inventario.obtener_material_por_nombre(texto)
+                        except Exception:
+                            pass
+
+                    if not material_encontrado:
+                        respuesta_texto = f"No encontré el material '{texto}'. Intenta de nuevo o escribe *cancelar*."
+                        # Mantenemos la acción pendiente para que pueda reintentar sin romper el flujo
+                        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+                        await guardar_contexto(usuario_id, contexto)
+                    else:
+                        contexto["accion_pendiente"] = {"tipo": "movimientos_rango", "material": material_encontrado.nombre}
+                        await guardar_contexto(usuario_id, contexto)
+                        await enviar_botones_whatsapp(
+                            telefono, f"¿Qué rango de fechas quieres ver para {material_encontrado.nombre}?",
+                            [("todo", "Todo el historial"), ("rango", "Elegir fechas")],
+                        )
+                        return
             elif accion["tipo"] == "movimientos_rango":
                 eleccion = texto.strip().lower()
                 if eleccion in {"todo", "1"}:
