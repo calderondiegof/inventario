@@ -763,8 +763,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
         
-# 1. Cuando piden ver el menú de opciones de inventario
-    if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
+# 1. Atrapamos el ID exacto cuando presionan el botón principal del menú
+    if texto_normalizado in {"ver_inventario", "ver inventario", "ver saldos", "saldos", "inventario"}:
+        # Si el usuario escribió o presionó la opción de ver inventario, desplegamos los 3 sub-botones
         await enviar_botones_whatsapp(
             telefono, 
             "¿Qué deseas consultar en el inventario?", 
@@ -776,7 +777,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         )
         return
 
-    # 2. Cuando hacen clic en el sub-botón de "Inventario total"
+    # 2. Sub-botón: Inventario total
     if texto_normalizado == "inv_total":
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
@@ -790,14 +791,14 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
         return
 
-    # 3. Cuando hacen clic en el sub-botón de "Ver movimientos"
+    # 3. Sub-botón: Ver movimientos
     if texto_normalizado == "inv_movs":
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
         return
 
-    # 4. Cuando hacen clic en el sub-botón de "Reporte de hoy"
+    # 4. Sub-botón: Reporte de hoy
     if texto_normalizado == "inv_hoy":
         reporte = await asyncio.to_thread(
             inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
@@ -805,7 +806,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
 
-    # 5. Captura rápida directa por texto para movimientos
+    # 5. Acceso directo por texto para movimientos
     if texto_normalizado in {"movimientos", "ver movimientos", "historial"}:
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
         await guardar_contexto(usuario_id, contexto)
