@@ -270,6 +270,48 @@ async def enviar_mensaje_whatsapp_json(payload: Dict[str, Any]) -> None:
         logger.error(f"❌ Error enviando mensaje JSON a WhatsApp: {e}")
 
 
+async def enviar_mensaje_whatsapp_json(payload: dict) -> None:
+    """
+    Función centralizada para enviar JSON a la API de WhatsApp.
+    Bloquea las caídas del servidor controlando las excepciones de httpx.
+    """
+    if not http_client:
+        logger.error("❌ http_client no inicializado")
+        return
+
+    url = f"https://facebook.com{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    cleaned = clean_payload(payload)
+    destino = cleaned.get("to", "Desconocido")
+    
+    logger.info(f"📤 Enviando payload seguro a {destino}")
+    
+    try:
+        # Petición HTTP asíncrona con protección ante caídas de red
+        response = await http_client.post(url, json=cleaned, headers=headers)
+        
+        if response.status_code == 401:
+            logger.error(f"❌ Error de autenticación (401) con Meta API. Revisa tu WHATSAPP_TOKEN.")
+            logger.error(f"Detalle de Meta: {response.text}")
+            return  # Retorna de forma segura sin romper el servidor
+            
+        response.raise_for_status()
+        logger.info(f"✅ Respuesta WhatsApp API: {response.status_code}")
+        
+    except httpx.ReadTimeout:
+        logger.error(f"⏳ Tiempo de espera agotado (Timeout) al conectar con Meta API para el destino: {destino}")
+    except httpx.ReadError as exc:
+        logger.error(f"📡 Error de red temporal en HTTPX con Meta API (Evitando caída del servidor): {exc}")
+    except httpx.HTTPStatusError as exc:
+        logger.error(f"💥 Meta API devolvió un error de estado {exc.response.status_code}: {exc.response.text}")
+    except Exception as e:
+        logger.error(f"⚠️ Error inesperado en el envío de WhatsApp: {e}")
+
+
 async def enviar_mensaje_whatsapp(destino: str, texto: str) -> None:
     to_clean = re.sub(r"\D", "", str(destino))
     payload = {
@@ -345,8 +387,6 @@ async def enviar_documento_whatsapp(destino: str, ruta_archivo: str, nombre_docu
 
     except Exception as e:
         logger.error(f"❌ Error enviando documento: {e}")
-
-
 async def subir_archivo_supabase(ruta_archivo: str, nombre_documento: str) -> str:
     if not supabase or not http_client:
         raise Exception("Supabase no configurado")
