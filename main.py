@@ -713,7 +713,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, respuesta_texto)
         return
-
     # Comandos directos por texto
     if texto.lower() == "anular":
         contexto["accion_pendiente"] = {"tipo": "espera_numero_remision"}
@@ -726,35 +725,25 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, "¿Cuál cliente deseas corregir? (nombre)")
         return
     if texto.lower() in {"ver grafico", "ver gráfico", "reporte visual"}:
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
         url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)
-    else:
-        await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
+        if url:
+            await enviar_imagen_whatsapp(telefono, url, f"Inventario de la bodega {bodega_id}")
+        else:
+            await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
         return
     texto_normalizado = texto.lower().strip()
     if texto_normalizado in {"reporte de hoy", "reporte hoy", "ver reporte de hoy"}:
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
         reporte = await asyncio.to_thread(
             inventario.obtener_reporte_diario_texto, bodega_id, fecha_local_mensaje(message)
         )
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
     if texto_normalizado in {"reporte de ayer", "reporte ayer", "ver reporte de ayer"}:
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
         fecha_ayer = (datetime.fromisoformat(fecha_local_mensaje(message)).date() - timedelta(days=1)).isoformat()
         reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha_ayer)
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
     if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
-        contexto["borrador_pendiente"] = {}
-        contexto["campo_esperado"] = None
-        await guardar_contexto(usuario_id, contexto)
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
             await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
@@ -806,49 +795,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿Qué remisión deseas anular o corregir? (ejemplo: REM_112)")
         return
-        
-# Comandos Rápidos y Reportes (Ver gráfico, saldos, inventario...)
-    # ... (aquí están tus otros if de gráfico, inventario, etc.) ...
 
-    # ==========================================================
-    # 👇 PEGA ESTE BLOQUE EXACTAMENTE AQUÍ (ANTES DE LLAMAR A DEEPSEEK)
-    # ==========================================================
-    if "movimiento" in texto_normalizado or "historial" in texto_normalizado:
-        partes = re.sub(r"(movimientos?|historial|de|ver|el|la)", "", texto_normalizado).strip()
-        if partes:
-            try:
-                resultado = await asyncio.to_thread(inventario.obtener_movimientos_material, bodega_id, partes)
-                mensaje_movimientos = formatear_movimientos_material(resultado)
-                await enviar_mensaje_whatsapp(telefono, mensaje_movimientos)
-            except Exception as e:
-                await enviar_mensaje_whatsapp(telefono, f"No encontré el material '{partes}' o hubo un error: {e}")
-        else:
-            contexto["accion_pendiente"] = {"tipo": "espera_material_movimiento"}
-            await guardar_contexto(usuario_id, contexto)
-            await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
-        return
-
-    if accion.get("tipo") == "espera_material_movimiento":
-        material_buscado = texto.strip()
-        try:
-            resultado = await asyncio.to_thread(inventario.obtener_movimientos_material, bodega_id, material_buscado)
-            respuesta_texto = formatear_movimientos_material(resultado)
-        except Exception as e:
-            respuesta_texto = f"No encontré movimientos para '{material_buscado}': {e}"
-        
-        contexto["accion_pendiente"] = {}
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, respuesta_texto)
-        return
-    # ==========================================================
-
-    # Procesamiento normal con DeepSeek (si no es un comando rápido)
-    await asyncio.to_thread(inventario.recargar_catalogos)
-    fecha_mensaje = fecha_local_mensaje(message)
-    borrador_anterior = contexto.get("borrador_pendiente") or {}
-    campo_esperado = contexto.get("campo_esperado")
-    
-    # Resto de tu código hacia abajo...
     
     await asyncio.to_thread(inventario.recargar_catalogos)
     fecha_mensaje = fecha_local_mensaje(message)
