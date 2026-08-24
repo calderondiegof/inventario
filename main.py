@@ -806,7 +806,39 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿Qué remisión deseas anular o corregir? (ejemplo: REM_112)")
         return
+        
+# === MANEJO DE MOVIMIENTOS DE MATERIALES ===
+    
+    if "movimiento" in texto_normalizado or "historial" in texto_normalizado:
+        # Extraer posible nombre de material (ej: "movimientos cobre" -> "cobre")
+        partes = re.sub(r"(movimientos?|historial|de|ver|el|la)", "", texto_normalizado).strip()
+        if partes:
+            try:
+                resultado = await asyncio.to_thread(inventario.obtener_movimientos_material, bodega_id, partes)
+                mensaje_movimientos = formatear_movimientos_material(resultado)
+                await enviar_mensaje_whatsapp(telefono, mensaje_movimientos)
+            except Exception as e:
+                await enviar_mensaje_whatsapp(telefono, f"No encontré el material '{partes}' o hubo un error: {e}")
+        else:
+            contexto["accion_pendiente"] = {"tipo": "espera_material_movimiento"}
+            await guardar_contexto(usuario_id, contexto)
+            await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+        return
 
+    # Si el bot estaba esperando que el usuario escriba el nombre del material para los movimientos:
+    if accion.get("tipo") == "espera_material_movimiento":
+        material_buscado = texto.strip()
+        try:
+            resultado = await asyncio.to_thread(inventario.obtener_movimientos_material, bodega_id, material_buscado)
+            respuesta_texto = formatear_movimientos_material(resultado)
+        except Exception as e:
+            respuesta_texto = f"No encontré movimientos para '{material_buscado}': {e}"
+        
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, respuesta_texto)
+        return
+    
     await asyncio.to_thread(inventario.recargar_catalogos)
     fecha_mensaje = fecha_local_mensaje(message)
     borrador_anterior = contexto.get("borrador_pendiente") or {}
