@@ -1072,7 +1072,7 @@ def debug() -> Dict[str, Any]:
 @app.get("/webhook")
 async def verificar_webhook(request: Request) -> Response:
     p = request.query_params
-    logger.info(f"GET /webhook/whatsapp - Parámetros: {dict(p)}")
+    logger.info(f"GET /webhook - Parámetros: {dict(p)}")
     logger.info(f"VERIFY_TOKEN configurado: {bool(VERIFY_TOKEN)}")
     logger.info(f"Token recibido: {p.get('hub.verify_token', '(vacío)')}")
     if p.get("hub.mode") == "subscribe" and hmac.compare_digest(p.get("hub.verify_token", ""), VERIFY_TOKEN):
@@ -1085,18 +1085,22 @@ async def verificar_webhook(request: Request) -> Response:
 async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) -> Response:
     cuerpo = await request.body()
     firma = request.headers.get("X-Hub-Signature-256", "")
-    logger.info("📨 POST /webhook - Recibido webhook de WhatsApp")
-    
-    # MODIFICACIÓN TEMPORAL SEGURA: Si la firma falla, avisa en el log pero DEJA PASAR el mensaje
-    if META_APP_SECRET and firma:
+    logger.info(f"📨 POST /webhook - Recibido webhook")
+    logger.info(f"Firma recibida: {firma[:30] if firma else '(vacía)'}...")
+    logger.info(f"Cuerpo: {cuerpo[:300]}...")
+    if META_APP_SECRET:
         esperada = "sha256=" + hmac.new(META_APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+        logger.info(f"Validando firma - Esperada: {esperada[:30]}...")
         if not hmac.compare_digest(firma, esperada):
-            logger.warning("⚠️ Advertencia de firma HMAC diferente, pero procesando mensaje para evitar bloqueo.")
-        else:
-            logger.info("✅ Firma validada correctamente")
+            logger.warning("❌ Firma inválida")
+            return Response("Firma inválida", status_code=403)
+        logger.info("✅ Firma validada")
+    else:
+        logger.warning("⚠️ META_APP_SECRET no configurado - Procesando sin validar firma")
 
     try:
         datos = json.loads(cuerpo)
+        logger.info(f"✅ JSON parseado correctamente")
         background_tasks.add_task(procesar_webhook, datos)
     except json.JSONDecodeError as e:
         logger.error(f"❌ Error parseando JSON: {e}")
