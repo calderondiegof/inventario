@@ -1144,3 +1144,7 @@ async def descargar_documento(nombre_archivo: str) -> Response:
     except Exception as e:
         logger.error(f"❌ Error descargando archivo: {e}")
         return Response("Error descargando archivo", status_code=500)
+
+    if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
