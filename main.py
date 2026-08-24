@@ -758,7 +758,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha_ayer)
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
-    if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
+if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
             await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
@@ -770,8 +770,12 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
             await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
         return
-    if texto_normalizado in {"movimientos", "ver movimientos", "movimientos material"}:
+
+    # 👇 BLOQUE OBLIGATORIO PARA CAPTURAR "MOVIMIENTOS" AL VUELO
+    if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "movimientos material"}:
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+        contexto["borrador_pendiente"] = {}
+        contexto["campo_esperado"] = None
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
         return
