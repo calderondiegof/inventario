@@ -64,6 +64,41 @@ else:
 http_client: Optional[httpx.AsyncClient] = None
 BOGOTA = ZoneInfo("America/Bogota")
 
+# =====================================================================
+# Deduplicación de mensajes entrantes (evita respuestas "espontáneas"
+# causadas por reintentos del webhook de Meta reenviando el mismo evento)
+# =====================================================================
+_MENSAJES_PROCESADOS: Dict[str, float] = {}
+_MENSAJES_PROCESADOS_TTL_SEGUNDOS = 600  # 10 minutos
+_MENSAJES_PROCESADOS_MAX = 2000
+
+
+def _ya_procesado(mensaje_id: Optional[str]) -> bool:
+    """
+    Evita procesar dos veces el mismo mensaje de WhatsApp.
+    Meta reintenta el envío del webhook si no recibe una respuesta rápida,
+    y sin esta protección eso generaba una segunda respuesta del bot que
+    parecía "aparecer sola". Es una protección en memoria: funciona bien
+    con una sola instancia del servicio (como en Render por defecto). Si
+    en el futuro corres varias instancias/workers, esto debe moverse a
+    una tabla en Supabase con una restricción UNIQUE sobre el id del mensaje.
+    """
+    if not mensaje_id:
+        return False
+    ahora = datetime.now().timestamp()
+    if len(_MENSAJES_PROCESADOS) > _MENSAJES_PROCESADOS_MAX:
+        expirados = [
+            k for k, t in _MENSAJES_PROCESADOS.items()
+            if ahora - t > _MENSAJES_PROCESADOS_TTL_SEGUNDOS
+        ]
+        for k in expirados:
+            _MENSAJES_PROCESADOS.pop(k, None)
+    if mensaje_id in _MENSAJES_PROCESADOS:
+        return True
+    _MENSAJES_PROCESADOS[mensaje_id] = ahora
+    return False
+
+
 # Expresiones regulares y utilidades
 LINEA_MATERIAL_CANTIDAD = re.compile(r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE)
 
@@ -157,6 +192,46 @@ def parsear_fecha_colombiana(texto: str) -> Optional[str]:
         return date(anio, mes, dia).isoformat()
     except ValueError:
         return None
+
+
+def normalizar_texto(s: str) -> str:
+    """Minúsculas y sin tildes/eñe, para comparar nombres de materiales de forma robusta."""
+    s = (s or "").strip().lower()
+    tabla = str.maketrans("áéíóúñ", "aeioun")
+    return s.translate(tabla)
+
+
+def buscar_material(texto_buscado: str, catalogo_materiales) -> Tuple[Optional[Any], List[Any]]:
+    """
+    Busca un material por nombre de forma segura, evitando el bug de que
+    "carter" traiga "Arreglo Carter" o "cobre" traiga "Arreglo Bronce y Cobre".
+
+    1. Si hay una coincidencia EXACTA (nombre completo, sin tildes/mayúsculas),
+       esa tiene prioridad absoluta sobre cualquier coincidencia parcial.
+    2. Si no hay exacta, se buscan coincidencias parciales (substring). Si hay
+       una sola, se usa. Si hay varias, se devuelven como candidatos para que
+       quien llama le pida al usuario que sea más específico, en vez de
+       quedarse con la primera al azar.
+
+    Retorna (material_encontrado_o_None, lista_de_candidatos_si_es_ambiguo)
+    """
+    texto_norm = normalizar_texto(texto_buscado)
+    if not texto_norm:
+        return None, []
+
+    materiales = list(catalogo_materiales.values())
+
+    for mat in materiales:
+        if normalizar_texto(mat.nombre) == texto_norm:
+            return mat, []
+
+    parciales = [mat for mat in materiales if texto_norm in normalizar_texto(mat.nombre)]
+    if len(parciales) == 1:
+        return parciales[0], []
+    if len(parciales) > 1:
+        return None, parciales
+
+    return None, []
 
 
 def formatear_movimientos_material(resultado: Dict[str, Any]) -> str:
@@ -508,7 +583,9 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
     datos.setdefault("cliente_direccion", None)
     datos.setdefault("cliente_placa", None)
     datos.setdefault("cliente_conductor", None)
+    datos.setdefault("cliente_conductor_id", None)
     datos.setdefault("cliente_celular", None)
+    datos.setdefault("cliente_conductor_celular", None)
 
     if intento in ("ENTRADA_REVUELTO", "REGISTRO_DIARIO") and not datos.get("entradas_revuelto"):
         return "Indica las fuentes y los kilos de Revuelto, por ejemplo: Cooperativa 500.", "entradas_revuelto"
@@ -516,9 +593,8 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
         return "Indica los materiales y kilos que se deben registrar.", "items"
     if intento == "SELECCION_REVUELTO" and not datos.get("items") and not datos.get("merma_kg", 0):
         return "Indica los materiales seleccionados o la cantidad de basura a descontar del Revuelto.", "items"
-    
+
     # Máquina de estados estricta para VENTA_DESPACHO
-# Máquina de estados estricta para VENTA_DESPACHO
     if intento == "VENTA_DESPACHO":
         if not datos.get("cliente"):
             return "Indica el nombre del cliente, por favor.", "cliente"
@@ -532,8 +608,8 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
                 faltantes.append("celular")
             if faltantes:
                 return f"Es un cliente nuevo, para registrarlo también necesito su {', '.join(faltantes)}.", "cliente_datos"
-        
-# Validación obligatoria de los datos completos del conductor y vehículo
+
+        # Validación obligatoria de los datos completos del conductor y vehículo
         faltantes_conductor = []
         if not datos.get("cliente_conductor"):
             faltantes_conductor.append("nombre del conductor")
@@ -567,6 +643,12 @@ async def guardar_contexto(usuario_id: int, contexto: Dict[str, Any]) -> None:
 
 async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str, Any]]) -> None:
     logger.info(f"🔄 Iniciando procesamiento de mensaje: {message}")
+
+    mensaje_id = message.get("id")
+    if _ya_procesado(mensaje_id):
+        logger.info(f"⏭️ Mensaje {mensaje_id} ya fue procesado antes (probable reintento de Meta), se ignora.")
+        return
+
     tipo_mensaje = message.get("type")
     if tipo_mensaje == "text":
         texto = message.get("text", {}).get("body", "").strip()
@@ -689,25 +771,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     contexto["accion_pendiente"] = {}
                     respuesta_texto = "Operación cancelada."
                 else:
-                    material_encontrado = None
-                    texto_buscado = texto.lower().strip()
-                    
-                    # Búsqueda flexible en el catálogo de materiales
-                    for mat in inventario.catalogo_materiales.values():
-                        if texto_buscado in mat.nombre.lower():
-                            material_encontrado = mat
-                            break
-                    
-                    if not material_encontrado:
-                        try:
-                            material_encontrado = inventario.obtener_material_por_nombre(texto)
-                        except Exception:
-                            pass
+                    material_encontrado, candidatos = buscar_material(texto, inventario.catalogo_materiales)
 
-                    if not material_encontrado:
-                        respuesta_texto = f"No encontré el material '{texto}'. Intenta de nuevo o escribe *cancelar*."
-                        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-                    else:
+                    if material_encontrado:
                         contexto["accion_pendiente"] = {"tipo": "movimientos_rango", "material": material_encontrado.nombre}
                         await guardar_contexto(usuario_id, contexto)
                         await enviar_botones_whatsapp(
@@ -715,6 +781,16 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                             [("todo", "Todo el historial"), ("rango", "Elegir fechas")],
                         )
                         return
+                    elif candidatos:
+                        nombres = ", ".join(c.nombre for c in candidatos[:8])
+                        respuesta_texto = (
+                            f"Encontré varios materiales que coinciden con '{texto}': {nombres}. "
+                            "Escribe el nombre exacto del que quieras consultar."
+                        )
+                        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
+                    else:
+                        respuesta_texto = f"No encontré el material '{texto}'. Intenta de nuevo o escribe *cancelar*."
+                        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
             elif accion["tipo"] == "movimientos_rango":
                 eleccion = texto.strip().lower()
                 if eleccion in {"todo", "1"}:
@@ -832,14 +908,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
 
     # 5. Acceso directo por texto para movimientos
-    if texto_normalizado in {"movimientos", "ver movimientos", "historial"}:
-        contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
-        return
-        
-    # 👇 BLOQUE OBLIGATORIO PARA CAPTURAR "MOVIMIENTOS" AL VUELO
-    if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "movimientos material"}:
+    if texto_normalizado in {"movimiento", "movimientos", "ver movimientos", "historial", "movimientos material"}:
         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
         contexto["borrador_pendiente"] = {}
         contexto["campo_esperado"] = None
@@ -897,62 +966,24 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     elif campo_esperado == "conductor_datos":
         datos = dict(borrador_anterior)
         campos_extraidos = parsear_campos_cliente_venta(texto)
-        
         for clave, valor in campos_extraidos.items():
             if valor:
                 datos[clave] = valor
-            
-        # Respaldo por posiciones si no vinieron etiquetados
-        if not datos.get("cliente_conductor") or not datos.get("cliente_conductor_id") or not datos.get("cliente_placa") or not datos.get("cliente_conductor_celular"):
+
+        # Respaldo posicional si el usuario no usó etiquetas
+        # (ej: "Juan Pérez, 10982345, ABC1234, 3001234567")
+        campos_pendientes = not all([
+            datos.get("cliente_conductor"),
+            datos.get("cliente_conductor_id"),
+            datos.get("cliente_placa"),
+            datos.get("cliente_conductor_celular"),
+        ])
+        if campos_pendientes:
             partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
-            if len(partes) >= 4:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-                if not datos.get("cliente_conductor_celular"): datos["cliente_conductor_celular"] = partes[3]
-            elif len(partes) == 3:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-            elif len(partes) == 2:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[1]
-            elif len(partes) == 1 and not datos.get("cliente_conductor"):
-                datos["cliente_conductor"] = partes[0]
-        
-        # Actualizamos todos los campos extraídos por el parser sin dejar ninguno fuera
-        for clave, valor in campos_extraidos.items():
-            if valor:
-                datos[clave] = valor
-            
-        # Respaldo por si el parser no atrapó las posiciones automáticamente
-        if not datos.get("cliente_conductor") or not datos.get("cliente_conductor_id") or not datos.get("cliente_placa") or not datos.get("cliente_celular"):
-            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
-            if len(partes) >= 4:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-                if not datos.get("cliente_celular"): datos["cliente_celular"] = partes[3]
-            elif len(partes) == 3:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_conductor_id"): datos["cliente_conductor_id"] = partes[1]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[2]
-            elif len(partes) == 2:
-                if not datos.get("cliente_conductor"): datos["cliente_conductor"] = partes[0]
-                if not datos.get("cliente_placa"): datos["cliente_placa"] = partes[1]
-            elif len(partes) == 1 and not datos.get("cliente_conductor"):
-                datos["cliente_conductor"] = partes[0]
-            
-        # Respaldo por si el parser estricto no atrapó ambos componentes
-        if not datos.get("cliente_conductor") or not datos.get("cliente_placa"):
-            partes = [p.strip() for p in re.split(r"[,\n;]+", texto) if p.strip()]
-            if len(partes) >= 2:
-                datos["cliente_conductor"] = partes[0]
-                datos["cliente_placa"] = partes[1]
-            elif len(partes) == 1 and not datos.get("cliente_conductor"):
-                datos["cliente_conductor"] = partes[0]
-            elif len(partes) == 1 and not datos.get("cliente_placa"):
-                datos["cliente_placa"] = partes[0]
+            orden_campos = ["cliente_conductor", "cliente_conductor_id", "cliente_placa", "cliente_conductor_celular"]
+            for clave, valor in zip(orden_campos, partes):
+                if not datos.get(clave):
+                    datos[clave] = valor
     elif campo_esperado in {"tipo_movimiento", "menu_ingreso"}:
         datos = dict(borrador_anterior)
         eleccion = texto.strip().lower()
@@ -1053,7 +1084,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                 cliente_conductor=datos.get("cliente_conductor"),
                 cliente_conductor_id=datos.get("cliente_conductor_id"),
                 cliente_placa=datos.get("cliente_placa"),
-                cliente_conductor_telefono=datos.get("cliente_conductor_celular"), # <--- Asegúrate de usar esta clave aquí
+                cliente_conductor_telefono=datos.get("cliente_conductor_celular"),
             )
 
             pdf_path = None
@@ -1068,8 +1099,8 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     documento=datos.get("cliente_documento"),
                     placa=datos.get("cliente_placa"),
                     conductor=datos.get("cliente_conductor"),
-                    id_conductor=datos.get("cliente_conductor_id"),       # Pasando la cédula del conductor
-                    celular_conductor=datos.get("cliente_conductor_telefono"), # Pasando el celular del conductor
+                    id_conductor=datos.get("cliente_conductor_id"),
+                    celular_conductor=datos.get("cliente_conductor_celular"),
                     celular=datos.get("cliente_celular"),
                     items=datos.get("items", []),
                     numero_remision=r.get("numero_remision", "SIN-NUMERO"),
@@ -1094,16 +1125,17 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         else:
             contexto["borrador_pendiente"] = datos
             await guardar_contexto(usuario_id, contexto)
-            
+
             menu_principal = [
                 ("1", "Ingresar Inventario"),
                 ("2", "Ver Inventario"),
                 ("3", "Anular Inventario")
             ]
-            
+
+            texto_pregunta = datos.get("respuesta_texto") or "¿Qué operación deseas registrar?"
             await enviar_botones_whatsapp(
                 destino=telefono,
-                texto=ai.respuesta_texto or "¿Qué operación deseas registrar?",
+                texto=texto_pregunta,
                 opciones=menu_principal
             )
             return
