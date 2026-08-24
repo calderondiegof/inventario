@@ -1089,7 +1089,7 @@ def debug() -> Dict[str, Any]:
     }
 
 
-@app.get("/webhook/whatsapp")
+@app.get("/webhook")
 async def verificar_webhook(request: Request) -> Response:
     p = request.query_params
     logger.info(f"GET /webhook/whatsapp - Parámetros: {dict(p)}")
@@ -1102,7 +1102,7 @@ async def verificar_webhook(request: Request) -> Response:
     return Response("Token inválido", status_code=403)
 
 
-@app.post("/webhook/whatsapp")
+@app.post("/webhook")
 async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks) -> Response:
     cuerpo = await request.body()
     firma = request.headers.get("X-Hub-Signature-256", "")
