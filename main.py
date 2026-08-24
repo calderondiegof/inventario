@@ -685,9 +685,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
 
                     if not material_encontrado:
                         respuesta_texto = f"No encontré el material '{texto}'. Intenta de nuevo o escribe *cancelar*."
-                        # Mantenemos la acción pendiente para que pueda reintentar sin romper el flujo
                         contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
-                        await guardar_contexto(usuario_id, contexto)
                     else:
                         contexto["accion_pendiente"] = {"tipo": "movimientos_rango", "material": material_encontrado.nombre}
                         await guardar_contexto(usuario_id, contexto)
