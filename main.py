@@ -249,8 +249,8 @@ async def verificar_webhook(request: Request):
         logger.info("✅ Webhook de Meta verificado correctamente")
         return Response(content=challenge, media_type="text/plain", status_code=200)
 
-    logger.error("❌ Fallo en la verificación del webhook de Meta")
-    return Response(content="Error de verificación", status_code=403)
+        logger.error("❌ Fallo en la verificación del webhook de Meta")
+        return Response(content="Error de verificación", status_code=403)
 
 def fecha_local_mensaje(message: Dict[str, Any]) -> str:
     marca = message.get("timestamp")
