@@ -665,7 +665,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             elif accion["tipo"] == "movimientos_material":
                 if texto.lower().strip() in {"cancelar", "salir", "menu"}:
                     contexto["accion_pendiente"] = {}
-                    await guardar_contexto(usuario_id, contexto)
                     respuesta_texto = "Operación cancelada."
                 else:
                     material_encontrado = None
