@@ -758,7 +758,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha_ayer)
         await enviar_mensaje_whatsapp(telefono, reporte)
         return
-if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
+    if texto_normalizado in {"ver inventario", "ver saldos", "saldos", "inventario"}:
         saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
         if not saldos:
             await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
