@@ -200,9 +200,7 @@ def formatear_movimientos_material(resultado: Dict[str, Any]) -> str:
                 f"• {mv['fecha']} — {mv['tipo']}: {signo}{mv['cantidad_kg']:,.2f} kg{fuente} "
                 f"| saldo: {mv['saldo_acumulado']:,.2f} kg"
             )
-    return "
-".join(lineas)
-
+        return "\n".join(lineas)
 
 def clean_payload(obj: Any) -> Any:
     if isinstance(obj, dict):
