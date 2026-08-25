@@ -20,13 +20,13 @@ ANCHO, ALTO = letter  # 612 x 792 pt
 MARGEN_IZQ = 40
 MARGEN_DER = 40
 COLUMNAS_TABLA = [
-    ("MATERIAL", 150),
-    ("CANTIDAD KG", 75),
-    ("N° EMPAQUE", 70),
-    ("VR X KILO", 65),
+    ("MATERIAL", 132),
+    ("CANTIDAD KG", 68),
+    ("N° EMPAQUE", 62),
+    ("VR X KILO", 60),
     ("VR TOTAL PESOS", 80),
-    ("VR KILO DÓLAR", 65),
-    ("VR TOTAL DÓLAR", 75),
+    ("VR KILO DÓLAR", 60),
+    ("VR TOTAL DÓLAR", 70),
 ]
 ANCHO_TABLA = sum(w for _, w in COLUMNAS_TABLA)
 FILAS_TABLA = 10
@@ -51,37 +51,54 @@ def _campo_con_linea(c: canvas.Canvas, label: str, valor: Optional[str], x: floa
 
 def _encabezado(c: canvas.Canvas, *, fecha: str, cliente: str, documento: Optional[str], direccion: Optional[str],
                  celular: Optional[str], numero_remision: str) -> float:
-    y = ALTO - 45
+    # ---- Bloque superior: razón social, logo y título ----
+    y_top = ALTO - 40  # 752
 
-    _campo_con_linea(c, "Cliente:", cliente, MARGEN_IZQ, y, MARGEN_IZQ + 60, 330)
-    y -= 30
-    _campo_con_linea(c, "Id Cliente:", documento, MARGEN_IZQ, y, MARGEN_IZQ + 70, 330)
-    y -= 30
-    _campo_con_linea(c, "Celular:", celular, MARGEN_IZQ, y, MARGEN_IZQ + 60, 330)
-    y -= 30
-    _campo_con_linea(c, "Dirección:", direccion, MARGEN_IZQ, y, MARGEN_IZQ + 70, 330)
-
-    x_titulo = 355
-    y_titulo = ALTO - 45
-    _texto(c, x_titulo, y_titulo, "Remision Salida", tam=11, negrita=True)
-    _texto(c, x_titulo + 15, y_titulo - 16, "de Material", tam=11, negrita=True)
-
-    _texto(c, x_titulo + 25, y_titulo - 55, "N°", tam=10, negrita=True)
-    c.setLineWidth(0.7)
-    c.line(x_titulo + 55, y_titulo - 62, x_titulo + 130, y_titulo - 62)
-    _texto(c, x_titulo + 60, y_titulo - 59, str(numero_remision), tam=9.5)
-
-    _texto(c, x_titulo, y_titulo - 90, f"Fecha: {fecha}", tam=9)
-
-    # Logo (caja negra con el isotipo, igual al membrete impreso)
-    ancho_logo, alto_logo = 145, 100
-    x_logo = ANCHO - MARGEN_DER - ancho_logo
-    y_logo = ALTO - 45 - alto_logo + 15
+    # Logo en la esquina superior derecha. Se usa anchor='sw' para que el punto
+    # (x_logo, y_logo) sea la esquina inferIor-izquierda de la imagen (con 'c'
+    # el logo se CENTRABA en ese punto y se salía/tapaba los otros campos).
+    ancho_logo, alto_logo = 120, 85
+    x_logo = ANCHO - MARGEN_DER - ancho_logo  # 612 - 40 - 120 = 452
+    y_logo = y_top - alto_logo               # parte inferior del logo
     if os.path.exists(RUTA_LOGO):
-        c.drawImage(RUTA_LOGO, x_logo, y_logo, width=ancho_logo, height=alto_logo,
-                     preserveAspectRatio=True, anchor='c', mask='auto')
+        try:
+            c.drawImage(RUTA_LOGO, x_logo, y_logo, width=ancho_logo, height=alto_logo,
+                         preserveAspectRatio=True, anchor='sw', mask='auto')
+        except Exception:
+            # No se debe impedir la remisión por un problema del logo.
+            pass
 
-    return ALTO - 45 - 4 * 30 - 25  # y donde continúa el resto del documento
+    # Razón social (izquierda) y título centrado (no invaden la zona del logo,
+    # que ocupa x de 452 a 572 en la parte superior).
+    _texto(c, MARGEN_IZQ, y_top, "FERROMA S.A.S", tam=15, negrita=True)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawCentredString(ANCHO / 2.0, y_top - 90, "Remisión de Salida de Material")
+
+    # ---- Datos de cliente (izquierda) y número/fecha (derecha) ----
+    y = y_top - 115  # debajo del logo y del título
+    # Fila 1: Cliente (izq) + N° (der, junto al margen derecho)
+    _campo_con_linea(c, "Cliente:", cliente, MARGEN_IZQ, y, MARGEN_IZQ + 90, 320)
+    _texto(c, 440, y, "N°", tam=10, negrita=True)
+    c.setLineWidth(0.7)
+    c.line(460, y - 2, ANCHO - MARGEN_DER, y - 2)
+    _texto(c, 463, y + 1, str(numero_remision), tam=9)
+    y -= 28
+
+    # Fila 2: Id Cliente (izq) + Fecha (der)
+    _campo_con_linea(c, "Id Cliente:", documento, MARGEN_IZQ, y, MARGEN_IZQ + 70, 320)
+    _texto(c, 440, y, "Fecha:", tam=10, negrita=True)
+    _texto(c, 475, y + 1, fecha, tam=9)
+    y -= 28
+
+    # Fila 3: Celular (izq)
+    _campo_con_linea(c, "Celular:", celular, MARGEN_IZQ, y, MARGEN_IZQ + 60, 320)
+    y -= 28
+
+    # Fila 4: Dirección (izq)
+    _campo_con_linea(c, "Dirección:", direccion, MARGEN_IZQ, y, MARGEN_IZQ + 70, 320)
+
+    # Devolver el y donde debe iniciar la tabla (pequeño espacio de separación).
+    return y - 14
 
 
 def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, Any]]) -> float:

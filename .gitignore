@@ -1,0 +1,21 @@
+# Entorno virtual de Python
+Lib/
+Scripts/
+Include/
+pyvenv.cfg
+.venv/
+venv/
+env/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Archivos temporales del sistema
+.DS_Store
+Thumbs.db
+
+# Entorno e IDE
+.env
+.vscode/
