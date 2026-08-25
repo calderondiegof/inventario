@@ -11,26 +11,28 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 
 RUTA_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo_ferroma.jpeg")
 
 ANCHO, ALTO = letter  # 612 x 792 pt
 
-MARGEN_IZQ = 40
-MARGEN_DER = 40
+MARGEN_IZQ = 33            # x donde inician las etiquetas (modelo REM_MODELO)
+X_TABLA = 31               # borde izquierdo de la tabla (modelo)
 COLUMNAS_TABLA = [
-    ("MATERIAL", 132),
-    ("CANTIDAD KG", 68),
-    ("N° EMPAQUE", 62),
-    ("VR X KILO", 60),
-    ("VR TOTAL PESOS", 80),
-    ("VR KILO DÓLAR", 60),
-    ("VR TOTAL DÓLAR", 70),
+    ("MATERIAL", 146),
+    ("CANTIDAD KG", 65),
+    ("N° EMPAQUE", 65),
+    ("VR X KILO", 65),
+    ("VR TOTAL PESOS", 65),
+    ("VR KILO DÓLAR", 65),
+    ("VR TOTAL DÓLAR", 73),
 ]
-ANCHO_TABLA = sum(w for _, w in COLUMNAS_TABLA)
+ANCHO_TABLA = sum(w for _, w in COLUMNAS_TABLA)   # 544 (modelo: x 31 -> 575)
 FILAS_TABLA = 10
-ALTO_FILA = 16
+ALTO_FILA = 15.3           # alto de fila del modelo (183.8 / 12 filas)
+Y_TABLA = 639              # borde superior de la tabla (modelo: top 153)
 
 
 def _texto(c: canvas.Canvas, x: float, y: float, texto: str, tam: int = 9, negrita: bool = False, centrado: bool = False, ancho_centro: float = 0) -> None:
@@ -41,68 +43,57 @@ def _texto(c: canvas.Canvas, x: float, y: float, texto: str, tam: int = 9, negri
         c.drawString(x, y, texto)
 
 
-def _campo_con_linea(c: canvas.Canvas, label: str, valor: Optional[str], x: float, y: float, x_linea: float, x_fin_linea: float) -> None:
-    _texto(c, x, y, label, tam=10, negrita=True)
+def _campo_con_linea(c: canvas.Canvas, label: str, valor: Optional[str], x: float, y: float, x_linea: float, x_fin_linea: float, tam_label: int = 10) -> None:
+    """Etiqueta con baseline en (x, y); línea 8pt por debajo; valor sentado sobre la línea."""
+    _texto(c, x, y, label, tam=tam_label, negrita=True)
     c.setLineWidth(0.7)
-    c.line(x_linea, y - 2, x_fin_linea, y - 2)
+    c.line(x_linea, y - 8, x_fin_linea, y - 8)
     if valor:
-        _texto(c, x_linea + 3, y + 1, str(valor), tam=9.5)
+        _texto(c, x_linea + 3, y - 6, str(valor), tam=9.5)
 
 
 def _encabezado(c: canvas.Canvas, *, fecha: str, cliente: str, documento: Optional[str], direccion: Optional[str],
                  celular: Optional[str], numero_remision: str) -> float:
-    # ---- Bloque superior: razón social, logo y título ----
-    y_top = ALTO - 40  # 752
+    """Encabezado replicando el modelo REM_MODELO (posiciones absolutas)."""
 
-    # Logo en la esquina superior derecha. Se usa anchor='sw' para que el punto
-    # (x_logo, y_logo) sea la esquina inferIor-izquierda de la imagen (con 'c'
-    # el logo se CENTRABA en ese punto y se salía/tapaba los otros campos).
-    ancho_logo, alto_logo = 120, 85
-    x_logo = ANCHO - MARGEN_DER - ancho_logo  # 612 - 40 - 120 = 452
-    y_logo = y_top - alto_logo               # parte inferior del logo
+    # --- Logo (modelo: caja x 447-571, top 14-123 => y 669-778) ---
+    # La caja es la del modelo; el logo se centra dentro de ella sin deformarse.
+    caja_ancho, caja_alto = 124, 109
+    caja_x, caja_y = 447, ALTO - 123          # esquina inferior-izquierda de la caja
     if os.path.exists(RUTA_LOGO):
         try:
-            c.drawImage(RUTA_LOGO, x_logo, y_logo, width=ancho_logo, height=alto_logo,
-                         preserveAspectRatio=True, anchor='sw', mask='auto')
+            c.drawImage(RUTA_LOGO, caja_x, caja_y,
+                         width=caja_ancho, height=caja_alto,
+                         preserveAspectRatio=True, anchor='c', mask='auto')
         except Exception:
-            # No se debe impedir la remisión por un problema del logo.
-            pass
+            pass  # el logo no debe impedir generar la remisión
 
-    # Razón social (izquierda) y título centrado (no invaden la zona del logo,
-    # que ocupa x de 452 a 572 en la parte superior).
-    _texto(c, MARGEN_IZQ, y_top, "FERROMA S.A.S", tam=15, negrita=True)
-    c.setFont("Helvetica-Bold", 11)
-    c.drawCentredString(ANCHO / 2.0, y_top - 90, "Remisión de Salida de Material")
+    # --- Título (modelo: "Remision Salida" x328/top28; "de Material" x357/top44) ---
+    _texto(c, 328, 753, "Remision Salida", tam=11, negrita=True)
+    _texto(c, 357, 738, "de Material", tam=11, negrita=True)
 
-    # ---- Datos de cliente (izquierda) y número/fecha (derecha) ----
-    y = y_top - 115  # debajo del logo y del título
-    # Fila 1: Cliente (izq) + N° (der, junto al margen derecho)
-    _campo_con_linea(c, "Cliente:", cliente, MARGEN_IZQ, y, MARGEN_IZQ + 90, 320)
-    _texto(c, 440, y, "N°", tam=10, negrita=True)
+    # --- Datos del cliente (izquierda; etiquetas x33, líneas 122->307) ---
+    _campo_con_linea(c, "Cliente:", cliente, MARGEN_IZQ, 758, 122, 307)
+    _campo_con_linea(c, "Id Cliente:", documento, MARGEN_IZQ, 730, 122, 307)
+    _campo_con_linea(c, "Celular:", celular, MARGEN_IZQ, 702, 122, 307)
+    _campo_con_linea(c, "Dirección:", direccion, MARGEN_IZQ, 678, 122, 307)
+
+    # --- N° de remisión (derecha, misma fila que Celular; línea 372->438) ---
+    _texto(c, 359, 702, "N°", tam=10, negrita=True)
     c.setLineWidth(0.7)
-    c.line(460, y - 2, ANCHO - MARGEN_DER, y - 2)
-    _texto(c, 463, y + 1, str(numero_remision), tam=9)
-    y -= 28
+    c.line(372, 694, 438, 694)
+    if numero_remision:
+        _texto(c, 375, 696, str(numero_remision), tam=9)
 
-    # Fila 2: Id Cliente (izq) + Fecha (der)
-    _campo_con_linea(c, "Id Cliente:", documento, MARGEN_IZQ, y, MARGEN_IZQ + 70, 320)
-    _texto(c, 440, y, "Fecha:", tam=10, negrita=True)
-    _texto(c, 475, y + 1, fecha, tam=9)
-    y -= 28
+    # --- Fecha (derecha, bajo el N°; zona libre en el modelo) ---
+    _texto(c, 359, 678, f"Fecha: {fecha}", tam=9, negrita=True)
 
-    # Fila 3: Celular (izq)
-    _campo_con_linea(c, "Celular:", celular, MARGEN_IZQ, y, MARGEN_IZQ + 60, 320)
-    y -= 28
-
-    # Fila 4: Dirección (izq)
-    _campo_con_linea(c, "Dirección:", direccion, MARGEN_IZQ, y, MARGEN_IZQ + 70, 320)
-
-    # Devolver el y donde debe iniciar la tabla (pequeño espacio de separación).
-    return y - 14
+    # La tabla inicia en una posición fija del modelo.
+    return Y_TABLA
 
 
 def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, Any]]) -> float:
-    x = MARGEN_IZQ
+    x = X_TABLA
     y = y_inicio
 
     # Encabezado de tabla
@@ -111,7 +102,7 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
     cx = x
     for nombre_col, ancho_col in COLUMNAS_TABLA:
         c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
-        _texto(c, cx, y - ALTO_FILA + 5, nombre_col, tam=7.5, negrita=True, centrado=True, ancho_centro=ancho_col)
+        _texto(c, cx, y - ALTO_FILA + 5, nombre_col, tam=7, negrita=True, centrado=True, ancho_centro=ancho_col)
         cx += ancho_col
     y -= ALTO_FILA
 
@@ -153,7 +144,7 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
     for idx, (nombre_col, ancho_col) in enumerate(COLUMNAS_TABLA):
         c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
         if idx == 0:
-            _texto(c, cx + 3, y - ALTO_FILA + 5, "TOTALES", tam=8, negrita=True)
+            _texto(c, cx, y - ALTO_FILA + 5, "TOTALES", tam=8, negrita=True, centrado=True, ancho_centro=ancho_col)
         elif nombre_col == "CANTIDAD KG":
             _texto(c, cx + 3, y - ALTO_FILA + 5, f"{total_kg:,.2f}", tam=8, negrita=True)
         elif nombre_col == "VR TOTAL PESOS":
@@ -165,44 +156,59 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
 
 
 def _observaciones(c: canvas.Canvas, y: float) -> float:
-    y -= 25
-    _texto(c, MARGEN_IZQ, y, "OBSERVACIONES:", tam=9.5, negrita=True)
+    """Observaciones con las 3 líneas del modelo (posiciones absolutas)."""
+    _texto(c, 33, 427, "OBSERVACIONES:", tam=9.5, negrita=True)
     c.setLineWidth(0.5)
-    for _ in range(2):
-        y -= 20
-        c.line(MARGEN_IZQ + 90, y - 2, ANCHO - MARGEN_DER, y - 2)
-    return y
+    c.line(177, 425, 574, 425)   # 1a línea (indentada, como el modelo)
+    c.line(32, 410, 574, 410)    # 2a línea (ancho completo)
+    c.line(32, 395, 574, 395)    # 3a línea (ancho completo)
+    return 395
 
 
 def _datos_conductor(c: canvas.Canvas, y: float, *, conductor: Optional[str], id_conductor: Optional[str],
                        celular_conductor: Optional[str], placa: Optional[str]) -> float:
-    y -= 45
-    _campo_con_linea(c, "CONDUCTOR:", conductor, MARGEN_IZQ + 20, y, MARGEN_IZQ + 100, MARGEN_IZQ + 320)
-    y -= 30
-    _campo_con_linea(c, "ID CONDUCTOR:", id_conductor, MARGEN_IZQ + 20, y, MARGEN_IZQ + 110, MARGEN_IZQ + 320)
-    y -= 30
-    _campo_con_linea(c, "CELULAR:", celular_conductor, MARGEN_IZQ + 20, y, MARGEN_IZQ + 90, MARGEN_IZQ + 320)
-    y -= 30
-    _texto(c, MARGEN_IZQ + 5, y, "PATENTE O PLACA", tam=9.5, negrita=True)
-    _texto(c, MARGEN_IZQ + 30, y - 12, "VEHICULO", tam=9.5, negrita=True)
+    """Datos del conductor (modelo REM_MODELO).
+
+    En el modelo las etiquetas están ALINEADAS A LA DERECHA y terminan todas en
+    x=120, justo antes de la línea (que empieza en x=122); así nunca se solapan
+    con la línea ni con el valor escrito sobre ella.
+    """
+    def etiqueta(texto: str, y_base: float) -> None:
+        ancho = stringWidth(texto, "Helvetica-Bold", 9.5)
+        _texto(c, 120 - ancho, y_base, texto, tam=9.5, negrita=True)
+
+    def campo(texto_label: str, y_label: float, valor: Optional[str], y_linea: float) -> None:
+        etiqueta(texto_label, y_label)
+        c.setLineWidth(0.7)
+        c.line(122, y_linea, 307, y_linea)
+        if valor:
+            _texto(c, 125, y_linea + 2, str(valor), tam=9.5)
+
+    campo("CONDUCTOR:", 345, conductor, 334)
+    campo("ID CONDUCTOR:", 315, id_conductor, 305)
+    campo("CELULAR:", 286, celular_conductor, 275)
+
+    # PATENTE O PLACA / VEHICULO (etiqueta en dos líneas, ambas alineadas a la derecha)
+    etiqueta("PATENTE O PLACA", 263)
+    etiqueta("VEHICULO", 249)
     c.setLineWidth(0.7)
-    c.line(MARGEN_IZQ + 100, y - 12, MARGEN_IZQ + 320, y - 12)
+    c.line(122, 245, 307, 245)
     if placa:
-        _texto(c, MARGEN_IZQ + 103, y - 9, str(placa), tam=9.5)
-    return y - 40
+        _texto(c, 125, 247, str(placa), tam=9.5)
+    return 245
 
 
 def _firmas(c: canvas.Canvas) -> None:
-    y = 90
+    """Firmas con las posiciones del modelo (líneas a y=138, textos 128/112)."""
     c.setLineWidth(0.7)
-    c.line(MARGEN_IZQ, y + 15, MARGEN_IZQ + 260, y + 15)
-    _texto(c, MARGEN_IZQ, y, "NOMBRE Y FIRMA DESPACHADOR FERROMA", tam=8.5)
-    _texto(c, MARGEN_IZQ, y - 14, "ID:", tam=8.5)
-
-    x_der = 340
-    c.line(x_der, y + 15, x_der + 230, y + 15)
-    _texto(c, x_der, y, "NOMBRE Y FIRMA CONDUCTOR", tam=8.5)
-    _texto(c, x_der, y - 14, "ID:", tam=8.5)
+    # Despachador (izquierda)
+    c.line(32, 138, 242, 138)
+    _texto(c, 33, 128, "NOMBRE Y FIRMA DESPACHADOR FERROMA", tam=8.5)
+    _texto(c, 33, 112, "ID:", tam=8.5)
+    # Conductor (derecha)
+    c.line(372, 138, 574, 138)
+    _texto(c, 374, 128, "NOMBRE Y FIRMA CONDUCTOR", tam=8.5)
+    _texto(c, 374, 112, "ID:", tam=8.5)
 
 
 def generar_remision_pdf_archivo(
