@@ -340,6 +340,50 @@ class InventarioServiceConValidacion:
             raise ValueError("No se pudo registrar el cliente.")
         return nuevo[0]
 
+    def obtener_conductor_por_nombre(self, nombre: str) -> Optional[Dict[str, Any]]:
+        """Busca un conductor por nombre en la tabla 'conductores' (tabla espejo de clientes)."""
+        filas = self.supabase.table("conductores").select("*").ilike("nombre", (nombre or "").strip()).execute().data
+        return filas[0] if filas else None
+
+    def obtener_o_crear_conductor(self, *, nombre: str, identificacion: Optional[str] = None,
+                                  placa: Optional[str] = None, telefono: Optional[str] = None) -> Dict[str, Any]:
+        """Módulo espejo de 'obtener_o_crear_cliente' pero para la tabla CONDUCTORES.
+
+        Busca por identificación (si se dio) o por nombre; si el conductor ya existe,
+        completa en su registro los campos que le falten; si no existe, lo crea.
+        """
+        nombre = (nombre or "").strip()
+        if not nombre:
+            raise ValueError("Toda venta debe indicar el nombre del conductor.")
+        existente = None
+        if identificacion:
+            filas = self.supabase.table("conductores").select("*").eq("identificacion", identificacion).execute().data
+            if filas:
+                existente = filas[0]
+        if not existente:
+            filas = self.supabase.table("conductores").select("*").ilike("nombre", nombre).execute().data
+            if filas:
+                existente = filas[0]
+        if existente:
+            # Si el conductor ya existe, se completan SOLO los campos que le falten.
+            cambios = {}
+            if not existente.get("identificacion") and identificacion:
+                cambios["identificacion"] = identificacion
+            if not existente.get("placa") and placa:
+                cambios["placa"] = placa
+            if not existente.get("telefono") and telefono:
+                cambios["telefono"] = telefono
+            if cambios:
+                actualizado = self.supabase.table("conductores").update(cambios).eq("id", existente["id"]).execute().data
+                existente = actualizado[0] if actualizado else existente
+            return existente
+        nuevo = self.supabase.table("conductores").insert({
+            "nombre": nombre, "identificacion": identificacion, "placa": placa, "telefono": telefono,
+        }).execute().data
+        if not nuevo:
+            raise ValueError("No se pudo registrar el conductor.")
+        return nuevo[0]
+
     def _movimiento(self, *, usuario_id: int, bodega_id: int, material_id: int,
                     tipo: TipoTransaccion, cantidad: float, fecha: str,
                     lote_id: str, fuente_id: Optional[int] = None,
@@ -510,6 +554,12 @@ class InventarioServiceConValidacion:
         cliente_registro = self.obtener_o_crear_cliente(
             nombre=cliente, documento=cliente_documento, telefono=cliente_telefono, direccion=cliente_direccion,
         )
+        conductor_registro = None
+        if cliente_conductor:
+            conductor_registro = self.obtener_o_crear_conductor(
+                nombre=cliente_conductor, identificacion=cliente_conductor_id,
+                placa=cliente_placa, telefono=cliente_conductor_telefono,
+            )
         validados = []
         for item in items:
             material, cantidad = self._material_obligatorio(item["material_nombre"]), self._cantidad(item["cantidad_kg"])
@@ -533,14 +583,12 @@ class InventarioServiceConValidacion:
             numero=numero_remision, 
             lote_operacion_id=lote_id, 
             cliente_id=cliente_registro["id"],
+            conductor_id=(conductor_registro or {}).get("id"),
             bodega_id=bodega_id, 
             fecha_operacion=fecha,
-            patente=cliente_placa,
-            conductor=cliente_conductor,
-            id_conductor=cliente_conductor_id,
-            celular_conductor=cliente_conductor_telefono,
         )
-        return {"lote_id": lote_id, "registros": registros, "cliente": cliente_registro, "numero_remision": numero_remision}
+        return {"lote_id": lote_id, "registros": registros, "cliente": cliente_registro,
+                "conductor": conductor_registro, "numero_remision": numero_remision}
 
         
     def generar_numero_remision(self) -> str:
@@ -569,23 +617,18 @@ class InventarioServiceConValidacion:
 
     def registrar_remision(self, *, numero: str, lote_operacion_id: str, cliente_id: int, 
                            bodega_id: int, fecha_operacion: str,
-                           patente: Optional[str] = None,
-                           conductor: Optional[str] = None,
-                           id_conductor: Optional[str] = None,
-                           celular_conductor: Optional[str] = None):
+                           conductor_id: Optional[int] = None):
         
-        # Diccionario con los datos que se insertan en la tabla 'remisiones' de Supabase
+        # La remisión solo guarda referencias: cliente_id y conductor_id.
+        # Los datos completos del cliente y del conductor viven en sus respectivas tablas.
         data = {
             "numero": numero,
             "lote_operacion_id": lote_operacion_id,
             "cliente_id": cliente_id,
+            "conductor_id": conductor_id,
             "bodega_id": bodega_id,
             "fecha_operacion": fecha_operacion,
             "estado": "ACTIVA",
-            "patente": patente,
-            "conductor": conductor,
-            "id_conductor": id_conductor,
-            "celular_conductor": celular_conductor,
         }
         
         self.supabase.table("remisiones").insert(data).execute()

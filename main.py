@@ -144,6 +144,21 @@ def parsear_campos_cliente_venta(texto: str) -> Dict[str, str]:
             
     return campos
 
+# Mapa de cada paso del asistente de venta (cliente/conductor) al campo del
+# borrador donde se guarda la respuesta. El módulo de cliente y el de conductor
+# usan EXACTAMENTE el mismo wizard por pasos; solo se registran en tablas
+# distintas (clientes => clientes, conductor => conductores).
+VENTA_CAMPOS_PASO = {
+    "cliente": "cliente",
+    "cliente_documento": "cliente_documento",
+    "cliente_direccion": "cliente_direccion",
+    "cliente_celular": "cliente_celular",
+    "conductor": "cliente_conductor",
+    "conductor_id": "cliente_conductor_id",
+    "conductor_placa": "cliente_placa",
+    "conductor_celular": "cliente_conductor_celular",
+}
+
 FECHA_COLOMBIANA = re.compile(r"^(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?$")
 
 def parsear_fecha_colombiana(texto: str) -> Optional[str]:
@@ -573,41 +588,30 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
     if intento == "SELECCION_REVUELTO" and not datos.get("items") and not datos.get("merma_kg", 0):
         return "Indica los materiales seleccionados o la cantidad de basura a descontar del Revuelto.", "items"
     
-    # Máquina de estados estricta para VENTA_DESPACHO
+    # Máquina de estados estricta para VENTA_DESPACHO.
+    # Cliente y conductor comparten el mismo wizard por pasos (módulos idénticos):
+    # se pide un campo a la vez y, si el conductor ya existe en la tabla
+    # "conductores", solo se solicitan los campos que aún le falten.
     if intento == "VENTA_DESPACHO":
+        # ---- Módulo CLIENTE ----
         if not datos.get("cliente"):
             return "Indica el nombre del cliente, por favor.", "cliente"
         if not cliente_existe:
-            faltantes = []
             if not datos.get("cliente_documento"):
-                faltantes.append("documento")
+                return "Es un cliente nuevo. Indica su documento / cédula.", "cliente_documento"
             if not datos.get("cliente_direccion"):
-                faltantes.append("dirección")
+                return "Indica la dirección del cliente.", "cliente_direccion"
             if not datos.get("cliente_celular"):
-                faltantes.append("celular")
-            if faltantes:
-                return f"Es un cliente nuevo, para registrarlo también necesito su {', '.join(faltantes)}.", "cliente_datos"
-        
-# Validación obligatoria de los datos completos del conductor y vehículo
-        faltantes_conductor = []
+                return "Indica el celular del cliente.", "cliente_celular"
+        # ---- Módulo CONDUCTOR (mismo wizard que cliente) ----
         if not datos.get("cliente_conductor"):
-            faltantes_conductor.append("nombre del conductor")
+            return "Indica el nombre del conductor, por favor.", "conductor"
         if not datos.get("cliente_conductor_id"):
-            faltantes_conductor.append("ID / cédula")
+            return "Indica el ID / cédula del conductor.", "conductor_id"
         if not datos.get("cliente_placa"):
-            faltantes_conductor.append("placa del vehículo")
+            return "Indica la placa (patente) del vehículo.", "conductor_placa"
         if not datos.get("cliente_conductor_celular"):
-            faltantes_conductor.append("celular del conductor")
-
-        if faltantes_conductor:
-            respuesta_orientadora = (
-                f"Falta indicar: {', '.join(faltantes_conductor)}.\n\n"
-                "Por favor, envía los datos completos del conductor y vehículo: "
-                "nombre, ID, placa y celular del conductor.\n\n"
-                "💡 *Recomendación:* Puedes ingresarlos separados por comas "
-                "(ej: Juan Pérez, 10982345, ABC1234, 3001234567)."
-            )
-            return respuesta_orientadora, "conductor_datos"
+            return "Indica el celular del conductor.", "conductor_celular"
 
     if intento == "COMPRA_DIRECTA" and not datos.get("fuente_compra"):
         datos["fuente_compra"] = "Compras"
@@ -948,15 +952,17 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     borrador_anterior = contexto.get("borrador_pendiente") or {}
     campo_esperado = contexto.get("campo_esperado")
 
-    if campo_esperado == "cliente":
+    if campo_esperado in VENTA_CAMPOS_PASO:
         datos = dict(borrador_anterior)
-        datos["cliente"] = texto.strip()
-    elif campo_esperado == "cliente_datos":
-        datos = dict(borrador_anterior)
-        datos.update(parsear_campos_cliente_venta(texto))
-    elif campo_esperado == "conductor_datos":
-        datos = dict(borrador_anterior)
-        datos.update(parsear_campos_cliente_venta(texto))
+        clave = VENTA_CAMPOS_PASO[campo_esperado]
+        valor = texto.strip()
+        # Si el usuario incluye la etiqueta del paso (ej. "placa ABC123", "id 1098")
+        # se extrae solo el valor mediante el parser de campos; si no, se toma el
+        # texto tal cual.
+        campos_parseados = parsear_campos_cliente_venta(texto)
+        if clave in campos_parseados:
+            valor = campos_parseados[clave]
+        datos[clave] = valor
     elif campo_esperado in {"tipo_movimiento", "menu_ingreso"}:
         datos = dict(borrador_anterior)
         eleccion = texto.strip().lower()
@@ -986,12 +992,21 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
 
     cliente_existente = None
+    conductor_existente = None
     if datos.get("intencion") == "VENTA_DESPACHO" and datos.get("cliente"):
         cliente_existente = await asyncio.to_thread(inventario.obtener_cliente_por_nombre, datos["cliente"])
         if cliente_existente:
             datos["cliente_documento"] = datos.get("cliente_documento") or cliente_existente.get("identificacion")
             datos["cliente_direccion"] = datos.get("cliente_direccion") or cliente_existente.get("direccion")
             datos["cliente_celular"] = datos.get("cliente_celular") or cliente_existente.get("telefono")
+    if datos.get("intencion") == "VENTA_DESPACHO" and datos.get("cliente_conductor"):
+        conductor_existente = await asyncio.to_thread(inventario.obtener_conductor_por_nombre, datos["cliente_conductor"])
+        if conductor_existente:
+            # Si el conductor ya existe, completar los datos que falten a partir del
+            # registro: así solo se piden por pasos los campos que aún no tiene.
+            datos["cliente_conductor_id"] = datos.get("cliente_conductor_id") or conductor_existente.get("identificacion")
+            datos["cliente_placa"] = datos.get("cliente_placa") or conductor_existente.get("placa")
+            datos["cliente_conductor_celular"] = datos.get("cliente_conductor_celular") or conductor_existente.get("telefono")
 
     if datos.get("intencion") in (None, "OTRO") and datos.get("items"):
         contexto["borrador_pendiente"] = datos
@@ -1057,17 +1072,18 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             try:
                 nombre_pdf = f"remision_{usuario_id}_{int(datetime.now(BOGOTA).timestamp())}.pdf"
                 pdf_path = os.path.join(tempfile.gettempdir(), nombre_pdf)
+                conductor_reg = r.get("conductor") or {}
                 await asyncio.to_thread(
                     generar_remision_pdf_archivo,
                     pdf_path,
                     fecha=fecha,
-                    cliente=datos.get("cliente", ""),
-                    documento=datos.get("cliente_documento"),
-                    placa=datos.get("cliente_placa"),
-                    conductor=datos.get("cliente_conductor"),
-                    id_conductor=datos.get("cliente_conductor_id"),       # Pasando la cédula del conductor
-                    celular_conductor=datos.get("cliente_conductor_telefono"), # Pasando el celular del conductor
-                    celular=datos.get("cliente_celular"),
+                    cliente=datos.get("cliente", "") or (r.get("cliente") or {}).get("nombre", ""),
+                    documento=datos.get("cliente_documento") or (r.get("cliente") or {}).get("identificacion"),
+                    placa=datos.get("cliente_placa") or conductor_reg.get("placa"),
+                    conductor=datos.get("cliente_conductor") or conductor_reg.get("nombre"),
+                    id_conductor=datos.get("cliente_conductor_id") or conductor_reg.get("identificacion"),
+                    celular_conductor=datos.get("cliente_conductor_telefono") or conductor_reg.get("telefono"),
+                    celular=datos.get("cliente_celular") or (r.get("cliente") or {}).get("telefono"),
                     items=datos.get("items", []),
                     numero_remision=r.get("numero_remision", "SIN-NUMERO"),
                     bodega_id=bodega_id,
