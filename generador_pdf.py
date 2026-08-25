@@ -1,5 +1,6 @@
 """Módulo para generar PDFs de remisión de material"""
 
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from io import BytesIO
@@ -9,9 +10,10 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib import colors
+from reportlab.pdfgen import canvas
 
 
-RUTA_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo_ferroma.jpg")
+RUTA_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo_ferroma.jpeg")
 
 ANCHO, ALTO = letter  # 612 x 792 pt
 
