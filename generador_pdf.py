@@ -11,205 +11,218 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib import colors
 
 
-def generar_remision_pdf(
-    fecha: str,
-    cliente: str,
-    documento: Optional[str] = None,
-    placa: Optional[str] = None,
-    conductor: Optional[str] = None,
-    id_conductor: Optional[str] = None,          # <--- Añadido
-    celular_conductor: Optional[str] = None,     # <--- Añadido
-    celular: Optional[str] = None,
-    items: List[Dict[str, Any]] = None,
-    numero_remision: str = "001",
-    empresa_nombre: str = "FERROMA S.A.S",
-    bodega_id: int = 1,
-) -> BytesIO:
-    """
-    Genera un PDF de remisión/factura de salida de material.
-    """
-    if items is None:
-        items = []
-    
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        topMargin=0.5*inch,
-        bottomMargin=0.5*inch,
-        leftMargin=0.5*inch,
-        rightMargin=0.5*inch,
-    )
-    
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=14,
-        textColor=colors.black,
-        spaceAfter=6,
-        alignment=TA_CENTER,
-        fontName='Helvetica-Bold',
-    )
-    
-    header_style = ParagraphStyle(
-        'Header',
-        parent=styles['Normal'],
-        fontSize=9,
-        textColor=colors.black,
-        spaceAfter=2,
-    )
-    
-    story = []
-    
-    # Encabezado
-    story.append(Paragraph(empresa_nombre, title_style))
-    story.append(Paragraph("REMISIÓN SALIDA DE MATERIAL", header_style))
-    story.append(Spacer(1, 0.15*inch))
-    
-    fecha_obj = datetime.strptime(fecha, "%Y-%m-%d")
-    fecha_formato = fecha_obj.strftime("%d de %B de %Y").upper()
-    
-    # Información general incluyendo conductor, ID y celular del conductor
-    info_data = [
-        ["FECHA:", fecha_formato, "RM:" + numero_remision],
-        ["CLIENTE:", cliente, "PLACA:", placa or ""],
-        ["CONDUCTOR:", conductor or "", "ID COND:", id_conductor or ""],
-        ["CEL. COND:", celular_conductor or "", "CEL. CLIENTE:", celular or ""],
-        ["DOCUMENTO:", documento or "", "BODEGA:", str(bodega_id)],
-    ]
-    
-    info_table = Table(info_data, colWidths=[1.2*inch, 2.5*inch, 1*inch, 1.8*inch])
-    info_table.setStyle(TableStyle([
-        ('FONT', (0, 0), (-1, -1), 'Helvetica', 8),
-        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 2),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-        ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-    ]))
-    
-    story.append(info_table)
-    story.append(Spacer(1, 0.2*inch))
-    
-    # Tabla de materiales
-    material_data = [
-        ["MATERIAL", "CANTIDAD\nEN KG.", "CANT.\nBOLSONES", "CANT.\nLONAS", "VR. MATERIAL\nX KILO", "VR. TOTAL", "DOLARES"]
-    ]
-    
-    total_kg = 0
-    total_valor = 0
-    
-    for item in items:
-        material = item.get("material_nombre", "").upper()
-        cantidad = float(item.get("cantidad_kg", 0))
-        precio = float(item.get("precio_unitario", 0))
-        valor_total = cantidad * precio
-        
-        total_kg += cantidad
-        total_valor += valor_total
-        
-        material_data.append([
-            material,
-            f"{cantidad:,.0f}",
-            "",
-            "",
-            f"${precio:,.0f}" if precio > 0 else "-",
-            f"${valor_total:,.0f}" if valor_total > 0 else "-",
-            "",
-        ])
-    
-    material_data.append([
-        "TOTALES",
-        f"{total_kg:,.0f}",
-        "0",
-        "0",
-        "",
-        f"${total_valor:,.0f}",
-        "",
-    ])
-    
-    material_table = Table(material_data, colWidths=[1.5*inch, 0.9*inch, 0.8*inch, 0.8*inch, 1.2*inch, 1.2*inch, 0.8*inch])
-    material_table.setStyle(TableStyle([
-        ('FONT', (0, 0), (-1, -1), 'Helvetica', 7),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-    ]))
-    
-    story.append(material_table)
-    story.append(Spacer(1, 0.3*inch))
-    
-    # Observaciones y firmas
-    obs_data = [
-        ["OBS:", ""],
-        ["", ""],
-        ["FERROMA S.A.S", "ENTREGADO POR:"],
-        ["DESPACHADO POR:", ""],
-    ]
-    
-    obs_table = Table(obs_data, colWidths=[1.5*inch, 4.5*inch])
-    obs_table.setStyle(TableStyle([
-        ('FONT', (0, 0), (-1, -1), 'Helvetica', 8),
-        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
-    ]))
-    
-    story.append(obs_table)
-    
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
+RUTA_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo_ferroma.jpg")
+
+ANCHO, ALTO = letter  # 612 x 792 pt
+
+MARGEN_IZQ = 40
+MARGEN_DER = 40
+COLUMNAS_TABLA = [
+    ("MATERIAL", 150),
+    ("CANTIDAD KG", 75),
+    ("N° EMPAQUE", 70),
+    ("VR X KILO", 65),
+    ("VR TOTAL PESOS", 80),
+    ("VR KILO DÓLAR", 65),
+    ("VR TOTAL DÓLAR", 75),
+]
+ANCHO_TABLA = sum(w for _, w in COLUMNAS_TABLA)
+FILAS_TABLA = 10
+ALTO_FILA = 16
+
+
+def _texto(c: canvas.Canvas, x: float, y: float, texto: str, tam: int = 9, negrita: bool = False, centrado: bool = False, ancho_centro: float = 0) -> None:
+    c.setFont("Helvetica-Bold" if negrita else "Helvetica", tam)
+    if centrado:
+        c.drawCentredString(x + ancho_centro / 2, y, texto)
+    else:
+        c.drawString(x, y, texto)
+
+
+def _campo_con_linea(c: canvas.Canvas, label: str, valor: Optional[str], x: float, y: float, x_linea: float, x_fin_linea: float) -> None:
+    _texto(c, x, y, label, tam=10, negrita=True)
+    c.setLineWidth(0.7)
+    c.line(x_linea, y - 2, x_fin_linea, y - 2)
+    if valor:
+        _texto(c, x_linea + 3, y + 1, str(valor), tam=9.5)
+
+
+def _encabezado(c: canvas.Canvas, *, fecha: str, cliente: str, documento: Optional[str], direccion: Optional[str],
+                 celular: Optional[str], numero_remision: str) -> float:
+    y = ALTO - 45
+
+    _campo_con_linea(c, "Cliente:", cliente, MARGEN_IZQ, y, MARGEN_IZQ + 60, 330)
+    y -= 30
+    _campo_con_linea(c, "Id Cliente:", documento, MARGEN_IZQ, y, MARGEN_IZQ + 70, 330)
+    y -= 30
+    _campo_con_linea(c, "Celular:", celular, MARGEN_IZQ, y, MARGEN_IZQ + 60, 330)
+    y -= 30
+    _campo_con_linea(c, "Dirección:", direccion, MARGEN_IZQ, y, MARGEN_IZQ + 70, 330)
+
+    x_titulo = 355
+    y_titulo = ALTO - 45
+    _texto(c, x_titulo, y_titulo, "Remision Salida", tam=11, negrita=True)
+    _texto(c, x_titulo + 15, y_titulo - 16, "de Material", tam=11, negrita=True)
+
+    _texto(c, x_titulo + 25, y_titulo - 55, "N°", tam=10, negrita=True)
+    c.setLineWidth(0.7)
+    c.line(x_titulo + 55, y_titulo - 62, x_titulo + 130, y_titulo - 62)
+    _texto(c, x_titulo + 60, y_titulo - 59, str(numero_remision), tam=9.5)
+
+    _texto(c, x_titulo, y_titulo - 90, f"Fecha: {fecha}", tam=9)
+
+    # Logo (caja negra con el isotipo, igual al membrete impreso)
+    ancho_logo, alto_logo = 145, 100
+    x_logo = ANCHO - MARGEN_DER - ancho_logo
+    y_logo = ALTO - 45 - alto_logo + 15
+    if os.path.exists(RUTA_LOGO):
+        c.drawImage(RUTA_LOGO, x_logo, y_logo, width=ancho_logo, height=alto_logo,
+                     preserveAspectRatio=True, anchor='c', mask='auto')
+
+    return ALTO - 45 - 4 * 30 - 25  # y donde continúa el resto del documento
+
+
+def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, Any]]) -> float:
+    x = MARGEN_IZQ
+    y = y_inicio
+
+    # Encabezado de tabla
+    c.setLineWidth(0.7)
+    c.rect(x, y - ALTO_FILA, ANCHO_TABLA, ALTO_FILA)
+    cx = x
+    for nombre_col, ancho_col in COLUMNAS_TABLA:
+        c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
+        _texto(c, cx, y - ALTO_FILA + 5, nombre_col, tam=7.5, negrita=True, centrado=True, ancho_centro=ancho_col)
+        cx += ancho_col
+    y -= ALTO_FILA
+
+    total_kg = 0.0
+    total_pesos = 0.0
+    total_dolar = 0.0
+
+    for i in range(FILAS_TABLA):
+        cx = x
+        item = items[i] if i < len(items) else None
+        for nombre_col, ancho_col in COLUMNAS_TABLA:
+            c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
+            if item:
+                valor = ""
+                if nombre_col == "MATERIAL":
+                    valor = str(item.get("material_nombre", ""))
+                elif nombre_col == "CANTIDAD KG":
+                    cantidad = float(item.get("cantidad_kg", 0) or 0)
+                    total_kg += cantidad
+                    valor = f"{cantidad:,.2f}"
+                elif nombre_col == "VR X KILO":
+                    precio = float(item.get("precio_unitario", 0) or 0)
+                    if precio:
+                        valor = f"{precio:,.0f}"
+                elif nombre_col == "VR TOTAL PESOS":
+                    cantidad = float(item.get("cantidad_kg", 0) or 0)
+                    precio = float(item.get("precio_unitario", 0) or 0)
+                    subtotal = cantidad * precio
+                    if subtotal:
+                        total_pesos += subtotal
+                        valor = f"{subtotal:,.0f}"
+                if valor:
+                    _texto(c, cx + 3, y - ALTO_FILA + 5, valor, tam=8)
+            cx += ancho_col
+        y -= ALTO_FILA
+
+    # Fila de totales
+    cx = x
+    for idx, (nombre_col, ancho_col) in enumerate(COLUMNAS_TABLA):
+        c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
+        if idx == 0:
+            _texto(c, cx + 3, y - ALTO_FILA + 5, "TOTALES", tam=8, negrita=True)
+        elif nombre_col == "CANTIDAD KG":
+            _texto(c, cx + 3, y - ALTO_FILA + 5, f"{total_kg:,.2f}", tam=8, negrita=True)
+        elif nombre_col == "VR TOTAL PESOS":
+            _texto(c, cx + 3, y - ALTO_FILA + 5, f"{total_pesos:,.0f}", tam=8, negrita=True)
+        cx += ancho_col
+    y -= ALTO_FILA
+
+    return y
+
+
+def _observaciones(c: canvas.Canvas, y: float) -> float:
+    y -= 25
+    _texto(c, MARGEN_IZQ, y, "OBSERVACIONES:", tam=9.5, negrita=True)
+    c.setLineWidth(0.5)
+    for _ in range(2):
+        y -= 20
+        c.line(MARGEN_IZQ + 90, y - 2, ANCHO - MARGEN_DER, y - 2)
+    return y
+
+
+def _datos_conductor(c: canvas.Canvas, y: float, *, conductor: Optional[str], id_conductor: Optional[str],
+                       celular_conductor: Optional[str], placa: Optional[str]) -> float:
+    y -= 45
+    _campo_con_linea(c, "CONDUCTOR:", conductor, MARGEN_IZQ + 20, y, MARGEN_IZQ + 100, MARGEN_IZQ + 320)
+    y -= 30
+    _campo_con_linea(c, "ID CONDUCTOR:", id_conductor, MARGEN_IZQ + 20, y, MARGEN_IZQ + 110, MARGEN_IZQ + 320)
+    y -= 30
+    _campo_con_linea(c, "CELULAR:", celular_conductor, MARGEN_IZQ + 20, y, MARGEN_IZQ + 90, MARGEN_IZQ + 320)
+    y -= 30
+    _texto(c, MARGEN_IZQ + 5, y, "PATENTE O PLACA", tam=9.5, negrita=True)
+    _texto(c, MARGEN_IZQ + 30, y - 12, "VEHICULO", tam=9.5, negrita=True)
+    c.setLineWidth(0.7)
+    c.line(MARGEN_IZQ + 100, y - 12, MARGEN_IZQ + 320, y - 12)
+    if placa:
+        _texto(c, MARGEN_IZQ + 103, y - 9, str(placa), tam=9.5)
+    return y - 40
+
+
+def _firmas(c: canvas.Canvas) -> None:
+    y = 90
+    c.setLineWidth(0.7)
+    c.line(MARGEN_IZQ, y + 15, MARGEN_IZQ + 260, y + 15)
+    _texto(c, MARGEN_IZQ, y, "NOMBRE Y FIRMA DESPACHADOR FERROMA", tam=8.5)
+    _texto(c, MARGEN_IZQ, y - 14, "ID:", tam=8.5)
+
+    x_der = 340
+    c.line(x_der, y + 15, x_der + 230, y + 15)
+    _texto(c, x_der, y, "NOMBRE Y FIRMA CONDUCTOR", tam=8.5)
+    _texto(c, x_der, y - 14, "ID:", tam=8.5)
 
 
 def generar_remision_pdf_archivo(
-    filepath: str,
+    ruta_salida: str,
+    *,
     fecha: str,
     cliente: str,
     documento: Optional[str] = None,
+    direccion: Optional[str] = None,
+    celular: Optional[str] = None,
     placa: Optional[str] = None,
     conductor: Optional[str] = None,
-    id_conductor: Optional[str] = None,          # <--- Añadido
-    celular_conductor: Optional[str] = None,     # <--- Añadido
-    celular: Optional[str] = None,
-    items: List[Dict[str, Any]] = None,
-    numero_remision: str = "001",
-    empresa_nombre: str = "FERROMA S.A.S",
-    bodega_id: int = 1,
+    id_conductor: Optional[str] = None,
+    celular_conductor: Optional[str] = None,
+    items: Optional[List[Dict[str, Any]]] = None,
+    numero_remision: str = "SIN-NUMERO",
+    bodega_id: Optional[int] = None,
 ) -> str:
-    """Genera PDF y lo guarda en un archivo"""
-    pdf_buffer = generar_remision_pdf(
-        fecha=fecha,
-        cliente=cliente,
-        documento=documento,
-        placa=placa,
-        conductor=conductor,
-        id_conductor=id_conductor,
-        celular_conductor=celular_conductor,
-        celular=celular,
-        items=items,
-        numero_remision=numero_remision,
-        empresa_nombre=empresa_nombre,
-        bodega_id=bodega_id,
+    """
+    Genera la remisión de salida de material de FERROMA en formato PDF,
+    replicando el modelo REM_MODELO.pdf, y la guarda en `ruta_salida`.
+    """
+    items = items or []
+
+    c = canvas.Canvas(ruta_salida, pagesize=letter)
+    c.setTitle(f"Remision {numero_remision}")
+
+    y = _encabezado(
+        c, fecha=fecha, cliente=cliente, documento=documento,
+        direccion=direccion, celular=celular, numero_remision=numero_remision,
     )
-    
-    with open(filepath, 'wb') as f:
-        f.write(pdf_buffer.getvalue())
-    
-    return filepath
+    y = _tabla_materiales(c, y, items)
+    y = _observaciones(c, y)
+    _datos_conductor(
+        c, y, conductor=conductor, id_conductor=id_conductor,
+        celular_conductor=celular_conductor, placa=placa,
+    )
+    _firmas(c)
+
+    c.showPage()
+    c.save()
+    return ruta_salida
