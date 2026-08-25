@@ -160,9 +160,30 @@ VENTA_CAMPOS_PASO = {
 }
 
 FECHA_COLOMBIANA = re.compile(r"^(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?$")
+# Días de la semana en español: se resuelven como el día más reciente (hacia atrás).
+DIAS_SEMANA = {
+    "lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2,
+    "jueves": 3, "viernes": 4, "sabado": 5, "sábado": 5, "domingo": 6,
+}
 
 def parsear_fecha_colombiana(texto: str) -> Optional[str]:
-    m = FECHA_COLOMBIANA.match(texto.strip())
+    texto = texto.strip().lower()
+    hoy = datetime.now(BOGOTA).date()
+    # Fechas relativas comunes, para que respuestas como "hoy"/"ayer" no
+    # tengan que pasar por la IA (evita duplicaciones del borrador).
+    if texto in {"hoy"}:
+        return hoy.isoformat()
+    if texto in {"ayer"}:
+        return (hoy - timedelta(days=1)).isoformat()
+    if texto in {"anteayer"}:
+        return (hoy - timedelta(days=2)).isoformat()
+    dia_semana = DIAS_SEMANA.get(texto)
+    if dia_semana is not None:
+        delta = (hoy.weekday() - dia_semana) % 7
+        if delta == 0:
+            delta = 7  # si es el mismo día de la semana, se asume hace una semana
+        return (hoy - timedelta(days=delta)).isoformat()
+    m = FECHA_COLOMBIANA.match(texto)
     if not m:
         return None
     dia, mes, anio = m.groups()
@@ -551,11 +572,18 @@ def fusionar_borrador(anterior: Dict[str, Any], nuevo: RespuestaAgente) -> Dict[
         resultado["items"] = list(items_existentes.values())
         datos.pop("items")
 
-    # Acumulación de entradas de revuelto
+    # Acumulación segura de entradas de revuelto: se fusionan por fuente
+    # (sumando cantidades) en lugar de duplicarlas si la IA vuelve a devolver
+    # fuentes que ya estaban en el borrador.
     if "entradas_revuelto" in datos:
-        existentes_rev = resultado.get("entradas_revuelto", [])
-        existentes_rev.extend(datos["entradas_revuelto"])
-        resultado["entradas_revuelto"] = existentes_rev
+        existentes_rev = {e["fuente_nombre"].lower(): e for e in resultado.get("entradas_revuelto", [])}
+        for entrada in datos["entradas_revuelto"]:
+            fuente_key = entrada["fuente_nombre"].lower()
+            if fuente_key in existentes_rev:
+                existentes_rev[fuente_key]["cantidad_kg"] += entrada.get("cantidad_kg", 0)
+            else:
+                existentes_rev[fuente_key] = entrada
+        resultado["entradas_revuelto"] = list(existentes_rev.values())
         datos.pop("entradas_revuelto")
 
     for clave, valor in datos.items():
