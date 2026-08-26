@@ -20,7 +20,7 @@ from supabase import Client, create_client
 
 from reporte_grafico import generar_y_subir_grafico_stock
 from generador_pdf import generar_remision_pdf_archivo
-from services.inventario_service import InventarioServiceConValidacion
+from services.inventario_service import InventarioServiceConValidacion, normalizar
 
 # Configuración de Logging
 logging.basicConfig(level=logging.INFO)
@@ -358,7 +358,96 @@ async def inferir_datos_ia(usuario: Dict[str, Any], bodega_id: int, fecha_mensaj
         )
     except Exception:
         return None
-    return fusionar_borrador(borrador, ai)
+    datos = fusionar_borrador(borrador, ai)
+    # Safety net: si la IA colocó en `merma_kg` la cantidad de un material
+    # comercializable del catálogo, reclasifíquila a `items` como resultado de
+    # selección. Solo 'basura'/'tierra' (o materiales BRUTO / no encontrados)
+    # deben permanecer en `merma_kg`.
+    datos = _reclasificar_merma_erronea(texto, datos)
+    return datos
+
+
+# Palabras que no forman parte del nombre canónico de un material y deben
+# eliminarse antes de buscar en el catálogo (ej. "Seleccion arreglo carter"
+# → "arreglo carter"). No incluimos "arreglo" porque forma parte de nombres
+# canónicos como "Arreglo Cobre y Bronce".
+_PALABRAS_CLAVE_PROCESO = {"seleccion", "selección", "seleccionar", "seleccionando"}
+
+
+def _limpiar_nombre_para_busqueda(nombre: str) -> str:
+    """Elimina palabras clave de proceso del nombre antes de buscar en el
+    catálogo. Devuelve el nombre limpio (minúsculas, sin tildes)."""
+    palabras = nombre.strip().lower().split()
+    filtradas = [p for p in palabras if normalizar(p) not in _PALABRAS_CLAVE_PROCESO]
+    return " ".join(filtradas) if filtradas else " ".join(palabras)
+
+
+def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]:
+    """Safety net: si la IA colocó en ``merma_kg`` la cantidad de un material
+    comercializable del catálogo, reclasifíquila a ``items`` como resultado de
+    selección. Solo 'basura' / 'tierra' (o materiales BRUTO / no encontrados)
+    deben permanecer en ``merma_kg``.
+
+    Esto evita que materiales válidos como 'arreglo carter' terminen registrados
+    como merma cuando el usuario los ingresa como item de selección.
+    """
+    if datos.get("intencion") not in ("SELECCION_REVUELTO", "REGISTRO_DIARIO"):
+        return datos
+    if not inventario:
+        return datos
+
+    merma_actual = float(datos.get("merma_kg") or 0)
+    if merma_actual <= 0:
+        return datos
+
+    # Re-parsea el texto del usuario en busca de pares "material cantidad".
+    lineas = re.split(r"[\n,;]+", texto.strip())
+    pares: List[Tuple[str, float]] = []
+    for linea in lineas:
+        par = parsear_material_cantidad(linea.strip())
+        if par:
+            pares.append((par[0], par[1]))
+
+    if not pares:
+        return datos
+
+    items_actuales = list(datos.get("items", []))
+    cantidades_a_mover = 0.0
+
+    for nombre, cantidad in pares:
+        # Intenta el nombre original y luego el nombre limpio (sin palabras
+        # clave de proceso).
+        mat = inventario.obtener_material_por_nombre(nombre)
+        if mat is None:
+            mat = inventario.obtener_material_por_nombre(
+                _limpiar_nombre_para_busqueda(nombre)
+            )
+
+        # Solo reclasifica si es un material no BRUTO (comercializable/
+        # aprovechable). Materiales BRUTO como 'Basura' o 'Tierra', o
+        # nombres que no están en el catálogo, permanecen en merma_kg.
+        if mat and mat.tipo_material != "BRUTO":
+            mat_key = normalizar(mat.nombre)
+            existing = next(
+                (i for i in items_actuales
+                 if normalizar(i.get("material_nombre", "")) == mat_key),
+                None,
+            )
+            if existing:
+                existing["cantidad_kg"] = float(existing.get("cantidad_kg", 0)) + cantidad
+            else:
+                items_actuales.append({
+                    "material_nombre": mat.nombre,
+                    "cantidad_kg": cantidad,
+                    "precio_unitario": 0.0,
+                })
+            cantidades_a_mover += cantidad
+
+    if cantidades_a_mover > 0:
+        datos["items"] = items_actuales
+        datos["merma_kg"] = max(0.0, merma_actual - cantidades_a_mover)
+
+    return datos
 
 
 # =====================================================================
@@ -503,7 +592,7 @@ Borrador de conversación previo: {json.dumps(borrador, ensure_ascii=False)}.
 
 Reglas de negocio:
 1. "Cooperativa", "Pesca", "Planta", "Corrientes" y "Compras" son fuentes, no materiales. Un bloque "Materiales" con esas líneas representa ENTRADA_REVUELTO: cada línea entra como material Revuelto desde su fuente.
-2. Un bloque "Material seleccionado" es SELECCION_REVUELTO. Sus materiales aprovechables van a `items`. Basura/tierra es `merma_kg`: NO va en `items` ni genera stock. La cantidad de Revuelto procesada es resultados + merma, salvo que el usuario indique otra cantidad explícita que debe coincidir. Si en EL MISMO mensaje están los bloques "Materiales" y "Material seleccionado", usa REGISTRO_DIARIO y conserva ambos bloques. IMPORTANTE: Si el usuario ingresa SOLO basura/merma sin materiales aprovechables (ej. "Basura 50"), es SELECCION_REVUELTO válido: `items` vacío, `merma_kg` con el valor. IMPORTANTE: Si el mensaje es solo "material cantidad" (uno o varios) y no queda claro si es una entrada directa, una transformación/selección de Revuelto, o una salida/venta (no menciona fuente, no dice "venta"/"despacho"/"compra", no dice "Revuelto"), NO asumas cuál es: usa intencion "OTRO", conserva los materiales y cantidades del usuario en `items`, y deja `respuesta_texto` vacío (el sistema pregunta por ti).
+2. Un bloque "Material seleccionado" es SELECCION_REVUELTO. Sus materiales aprovechables van a `items`. REGLA CLAVE: SI el nombre de un material coincide con alguno de los 'Materiales permitidos' listados arriba, DEBE ir a `items` como 'Resultado de selección de Revuelto'. NUNCA a `merma_kg`. ÚNICAMENTE 'basura', 'tierra', 'basura y tierra' (o expresiones que claramente sean residuos no aprovechables) van a `merma_kg`. Materiales como 'arreglo carter', 'carter', 'latón', 'cobre', 'bronce', 'aluminio', etc. son materiales del catálogo y van a `items`, NUNCA a `merma_kg`. La cantidad de Revuelto procesada es resultados + merma, salvo que el usuario indique otra cantidad explícita que debe coincidir. Si en EL MISMO mensaje están los bloques "Materiales" y "Material seleccionado", usa REGISTRO_DIARIO y conserva ambos bloques. IMPORTANTE: Si el usuario ingresa SOLO basura/merma sin materiales aprovechables (ej. "Basura 50"), es SELECCION_REVUELTO válido: `items` vacío, `merma_kg` con el valor. IMPORTANTE: Si el mensaje es solo "material cantidad" (uno o varios) y no queda claro si es una entrada directa, una transformación/selección de Revuelto, o una salida/venta (no menciona fuente, no dice "venta"/"despacho"/"compra", no dice "Revuelto"), NO asumas cuál es: usa intencion "OTRO", conserva los materiales y cantidades del usuario en `items`, y deja `respuesta_texto` vacío (el sistema pregunta por ti).
 3. "Compra de ..." es COMPRA_DIRECTA: entra directamente el material indicado, nunca Revuelto. Usa fuente_compra "Compras" si no se menciona proveedor y existe esa fuente.
 4. "Venta" o "despacho" es VENTA_DESPACHO. Admite muchos materiales en `items`. Extrae:
    - cliente (nombre)
