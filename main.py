@@ -383,13 +383,17 @@ def _limpiar_nombre_para_busqueda(nombre: str) -> str:
 
 
 def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]:
-    """Safety net: si la IA colocó en ``merma_kg`` la cantidad de un material
-    comercializable del catálogo, reclasifíquila a ``items`` como resultado de
-    selección. Solo 'basura' / 'tierra' (o materiales BRUTO / no encontrados)
-    deben permanecer en ``merma_kg``.
+    """Safety net: si la IA colocó en ``merma_kg`` (o simplemente omitió) la
+    cantidad de un material comercializable del catálogo, reclasifíquila a
+    ``items`` como resultado de selección. También corrige el caso en que
+    la IA duplica cantidades (material en ``items`` Y en ``merma_kg`` al
+    mismo tiempo), recalculando ``merma_kg`` desde el texto.
 
-    Esto evita que materiales válidos como 'arreglo carter' terminen registrados
-    como merma cuando el usuario los ingresa como item de selección.
+    Reglas:
+    - Materiales no BRUTO del catálogo → ``items`` (Resultado de selección).
+    - Fuentes como 'Cooperativa', 'Pesca', etc. → se omiten.
+    - Materiales BRUTO ('Basura', 'Tierra') o nombres no reconocidos → ``merma_kg``.
+    - Solo 'basura' / 'tierra' deben permanecer en ``merma_kg``.
     """
     if datos.get("intencion") not in ("SELECCION_REVUELTO", "REGISTRO_DIARIO"):
         return datos
@@ -397,14 +401,13 @@ def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, 
         return datos
 
     merma_actual = float(datos.get("merma_kg") or 0)
-    if merma_actual <= 0:
-        return datos
 
     # Re-parsea el texto del usuario en busca de pares "material cantidad".
     lineas = re.split(r"[\n,;]+", texto.strip())
     pares: List[Tuple[str, float]] = []
     for linea in lineas:
-        par = parsear_material_cantidad(linea.strip())
+        linea_limpia = linea.strip().lstrip("*-•").strip()
+        par = parsear_material_cantidad(linea_limpia)
         if par:
             pares.append((par[0], par[1]))
 
@@ -412,40 +415,65 @@ def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, 
         return datos
 
     items_actuales = list(datos.get("items", []))
+
+    # Pre-computa las claves canónicas ya presentes en items para evitar
+    # duplicados (incluso cuando el AI usó un nombre sinónimo como
+    # "Rechazo grueso" en lugar de "Arreglo Carter").
+    existing_keys: set = set()
+    for i in items_actuales:
+        existing_mat = inventario.obtener_material_por_nombre(i.get("material_nombre", ""))
+        if existing_mat:
+            existing_keys.add(normalizar(existing_mat.nombre))
+
+    correct_merma = 0.0
     cantidades_a_mover = 0.0
+    items_modificados = False
 
     for nombre, cantidad in pares:
+        # Omitir fuentes (no son materiales).
+        if inventario.obtener_fuente_por_nombre(nombre):
+            continue
+
         # Intenta el nombre original y luego el nombre limpio (sin palabras
-        # clave de proceso).
+        # clave de proceso como 'seleccion').
         mat = inventario.obtener_material_por_nombre(nombre)
         if mat is None:
             mat = inventario.obtener_material_por_nombre(
                 _limpiar_nombre_para_busqueda(nombre)
             )
 
-        # Solo reclasifica si es un material no BRUTO (comercializable/
-        # aprovechable). Materiales BRUTO como 'Basura' o 'Tierra', o
-        # nombres que no están en el catálogo, permanecen en merma_kg.
         if mat and mat.tipo_material != "BRUTO":
+            # Material comercializable → debe estar en items, NUNCA en merma.
             mat_key = normalizar(mat.nombre)
-            existing = next(
-                (i for i in items_actuales
-                 if normalizar(i.get("material_nombre", "")) == mat_key),
-                None,
-            )
-            if existing:
-                existing["cantidad_kg"] = float(existing.get("cantidad_kg", 0)) + cantidad
-            else:
+            if mat_key not in existing_keys:
                 items_actuales.append({
                     "material_nombre": mat.nombre,
                     "cantidad_kg": cantidad,
                     "precio_unitario": 0.0,
                 })
-            cantidades_a_mover += cantidad
+                existing_keys.add(mat_key)
+                cantidades_a_mover += cantidad
+                items_modificados = True
+        else:
+            # Basura / tierra / no encontrado → va a merma_kg.
+            correct_merma += cantidad
 
-    if cantidades_a_mover > 0:
+    # --- Corrección 1: materiales faltantes en items ---
+    if items_modificados:
         datos["items"] = items_actuales
-        datos["merma_kg"] = max(0.0, merma_actual - cantidades_a_mover)
+        # Recalcula merma desde cero: solo basura/tierra deben quedar.
+        datos["merma_kg"] = max(0.0, correct_merma)
+        # Si recalculamos merma, invalida cantidad_revuelto_procesada para
+        # que el servicio lo recupere como resultados + merma.
+        datos.pop("cantidad_revuelto_procesada", None)
+        return datos
+
+    # --- Corrección 2: duplicación (material en items Y en merma) ---
+    # La IA puso el mismo material en items y en merma_kg. Recalcula merma
+    # basándose en el texto: solo basura/tierra van a merma.
+    if abs(correct_merma - merma_actual) > 0.01:
+        datos["merma_kg"] = max(0.0, correct_merma)
+        datos.pop("cantidad_revuelto_procesada", None)
 
     return datos
 
