@@ -1221,7 +1221,10 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     await asyncio.to_thread(
                         inventario.aprobar_remision_con_precios,
                         accion["remision_id"], accion["vr_dolar_dia"],
-                        {int(k): v for k, v in accion["precios"].items()},
+                        # Claves tal cual (str en BD real con UUID; el servicio
+                        # las normaliza a str para el JSONB). NO convertir a
+                        # int: con PKs UUID lanzaría ValueError.
+                        dict(accion["precios"]),
                     )
                     datos_pdf = await asyncio.to_thread(
                         inventario.obtener_datos_pdf_remision, accion["numero"])
