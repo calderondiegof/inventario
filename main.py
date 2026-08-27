@@ -885,19 +885,24 @@ async def regenerar_y_enviar_pdf_remision(telefono: str, bodega_id: int, numero:
 async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str, Any]]) -> None:
     logger.info(f"🔄 Iniciando procesamiento de mensaje: {message}")
     tipo_mensaje = message.get("type")
-    if tipo_mensaje == "text":
-        texto = message.get("text", {}).get("body", "").strip()
-    elif tipo_mensaje == "interactive":
+    # 1) Extracción del texto entrante con cadena de fallbacks INDEPENDIENTE
+    #    del campo 'type' (texto, botón interactivo o lista interactiva), y
+    #    normalización única al inicio: así ninguna rama posterior de la
+    #    función puede usar `texto`/`texto_normalizado` sin definir
+    #    (evita el UnboundLocalError en los triggers de comandos directos).
+    texto_recibido = (
+        message.get("text", {}).get("body", "")
+        or message.get("interactive", {}).get("button_reply", {}).get("id", "")
+        or message.get("interactive", {}).get("list_reply", {}).get("id", "")
+    )
+    texto_normalizado = texto_recibido.strip().lower()
+    texto = texto_recibido.strip()
+    if tipo_mensaje == "interactive":
         interactivo = message.get("interactive", {})
-        if interactivo.get("type") == "button_reply":
-            texto = interactivo["button_reply"]["id"]
-        elif interactivo.get("type") == "list_reply":
-            texto = interactivo["list_reply"]["id"]
-        else:
+        if interactivo.get("type") not in {"button_reply", "list_reply"}:
             logger.warning(f"⚠️ Tipo interactivo no soportado: {interactivo.get('type')}")
-            return
-    else:
-        logger.warning(f"⚠️ Mensaje no es de texto ni interactivo: tipo={tipo_mensaje}")
+    if not texto:
+        logger.warning(f"⚠️ Mensaje sin texto soportado: tipo={tipo_mensaje}")
         return
     telefono = str(message.get("from", "")).replace("+", "")
     logger.info(f"📱 Teléfono: {telefono}, Texto: {texto}")
@@ -1388,7 +1393,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         else:
             await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
         return
-    texto_normalizado = texto.lower().strip()
+    # `texto_normalizado` ya viene normalizado desde el inicio de la función.
     if texto_normalizado in {"reporte de hoy", "reporte hoy", "ver reporte de hoy"}:
         await enviar_reporte_diario(telefono, bodega_id, message)
         return
