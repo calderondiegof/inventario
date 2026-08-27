@@ -57,6 +57,18 @@ class _Query:
         self.rows = [r for r in self.rows if str(r.get(col, "")).lower() == v]
         return self
 
+    def order(self, col, desc=False):
+        self.rows = sorted(
+            self.rows,
+            key=lambda r: (r.get(col) is not None, r.get(col) if r.get(col) is not None else 0),
+            reverse=bool(desc),
+        )
+        return self
+
+    def limit(self, n):
+        self.rows = self.rows[:n]
+        return self
+
     def update(self, changes):
         self._changes = dict(changes)
         return self
@@ -91,6 +103,26 @@ class _RpcBuilder:
                 mm.setdefault("id", self.fake._next_id("mermas_proceso"))
                 self.fake._tables["mermas_proceso"].append(dict(mm))
             return _Resp(self.params.get("p_movimientos", []))
+        if self.name == "aprobar_remision_con_precios":
+            # Replica la RPC PostgreSQL: fija vr_dolar_dia + estado='APROBADA'
+            # en la remision y guarda precio_unitario SOLO en los movimientos
+            # de su lote.
+            rid = self.params.get("p_remision_id")
+            vd = self.params.get("p_vr_dolar_dia")
+            precios = self.params.get("p_precios_items") or {}
+            rem = next((r for r in self.fake._tables["remisiones"] if r["id"] == rid), None)
+            if rem is None:
+                raise ValueError(f"Remision {rid} no existe")
+            lote = rem["lote_operacion_id"]
+            aplicados = 0
+            for m in self.fake._tables["movimientos_inventario"]:
+                if m.get("lote_operacion_id") == lote and str(m["id"]) in precios:
+                    m["precio_unitario"] = float(precios[str(m["id"])])
+                    aplicados += 1
+            rem["vr_dolar_dia"] = vd
+            rem["estado"] = "APROBADA"
+            return _Resp([{"id": rid, "numero": rem["numero"], "estado": "APROBADA",
+                           "vr_dolar_dia": vd, "movimientos_precios": aplicados}])
         return _Resp([])
 
 
@@ -324,7 +356,10 @@ def test_regenerar_pdf_datos():
     _cons("PDF datos: conserva el MISMO numero", datos["numero_remision"] == "REM_7")
     _cons("PDF datos: cliente cargado", (datos["cliente"] or {}).get("nombre") == "Cliente X")
     _cons("PDF datos: conductor cargado", (datos["conductor"] or {}).get("placa") == "ABC123")
-    _cons("PDF datos: items con cantidad positiva", datos["items"] == [{"material_nombre": "Carter", "cantidad_kg": 3500.0}])
+    # El item ahora incluye 'precio_unitario' (None en ORDEN_SALIDA) para el
+    # PDF 'APROBADA'; se validan los campos clave en vez de igualdad exacta.
+    _it = (datos["items"] or [{}])[0]
+    _cons("PDF datos: items con cantidad positiva", _it.get("material_nombre") == "Carter" and _it.get("cantidad_kg") == 3500.0 and "precio_unitario" in _it)
 
     # Remisión inexistente debe lanzar ValueError
     try:
@@ -332,6 +367,50 @@ def test_regenerar_pdf_datos():
         _cons("PDF datos: rechaza remision inexistente", False)
     except ValueError:
         _cons("PDF datos: rechaza remision inexistente", True)
+
+
+def test_ordenes_salida_y_aprobacion():
+    """Nuevos métodos del flujo de Contabilidad: listar las últimas Órdenes de
+    Salida (ORDEN_SALIDA, por bodega, más recientes primero) y la RPC
+    aprobar_remision_con_precios (fija dólar, aprueba y guarda precios)."""
+    fake = FakeSupabase()
+    fake._seed("materiales", [
+        {"nombre": "Carter", "tipo_material": "LIMPIO", "es_comercializable": True},
+    ])
+    fake._seed("remisiones", [
+        {"id": 101, "numero": "REM_101", "lote_operacion_id": "lote-101", "bodega_id": B,
+         "fecha_operacion": "2026-01-25", "estado": "ORDEN_SALIDA"},
+        {"id": 102, "numero": "REM_102", "lote_operacion_id": "lote-102", "bodega_id": B,
+         "fecha_operacion": "2026-01-26", "estado": "ORDEN_SALIDA"},
+        {"id": 103, "numero": "REM_103", "lote_operacion_id": "lote-103", "bodega_id": 2,
+         "fecha_operacion": "2026-01-26", "estado": "ORDEN_SALIDA"},  # otra bodega
+        {"id": 104, "numero": "REM_104", "lote_operacion_id": "lote-104", "bodega_id": B,
+         "fecha_operacion": "2026-01-27", "estado": "APROBADA"},      # ya aprobada
+    ])
+    fake._seed("movimientos_inventario", [
+        {"id": 900, "bodega_id": B, "material_id": _mid(fake, "Carter"),
+         "lote_operacion_id": "lote-101", "anulado": False, "cantidad_kg": -3500.0},
+        {"id": 901, "bodega_id": B, "material_id": _mid(fake, "Carter"),
+         "lote_operacion_id": "lote-102", "anulado": False, "cantidad_kg": -1200.0},
+    ])
+    svc = InventarioServiceConValidacion(fake)
+
+    ordenes = svc.obtener_ordenes_salida(B, 3)
+    _ok("Ordenes: filtra bodega y estado, mas recientes primero",
+        [o["id"] for o in ordenes] == [102, 101])
+    _ok("Ordenes: respeta el limite",
+        [o["id"] for o in svc.obtener_ordenes_salida(B, 1)] == [102])
+
+    res = svc.aprobar_remision_con_precios(101, 4120.50, {900: 2500.0})
+    rem = next(r for r in fake._tables["remisiones"] if r["id"] == 101)
+    mov = next(m for m in fake._tables["movimientos_inventario"] if m["id"] == 900)
+    otro = next(m for m in fake._tables["movimientos_inventario"] if m["id"] == 901)
+    _ok("Aprobacion: estado APROBADA", rem["estado"] == "APROBADA")
+    _ok("Aprobacion: vr_dolar_dia fijado", float(rem["vr_dolar_dia"]) == 4120.50)
+    _ok("Aprobacion: precio_unitario guardado en el lote", float(mov["precio_unitario"]) == 2500.0)
+    _ok("Aprobacion: no toca movimientos de otros lotes", otro.get("precio_unitario") is None)
+    _ok("Aprobacion: resumen devuelto",
+        res.get("estado") == "APROBADA" and res.get("numero") == "REM_101")
 
 
 def main():
@@ -342,6 +421,7 @@ def main():
     test_stock_insuficiente()
     test_vender_merma()
     test_regenerar_pdf_datos()
+    test_ordenes_salida_y_aprobacion()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1
