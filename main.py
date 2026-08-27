@@ -7,6 +7,7 @@ import os
 import uvicorn
 import tempfile
 import re
+import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -351,14 +352,24 @@ async def pedir_movimientos_material(telefono: str, usuario_id: int, contexto: D
 
 
 # Frases que activan el flujo de aprobación de Contabilidad (Orden de Salida
-# -> Remisión Aprobada). Se normalizan a minúsculas.
+# -> Remisión Aprobada). Se comparan contra el texto normalizado por
+# _normalizar_texto (minúsculas SIN acentos), por lo que las variantes con
+# tilde de este conjunto quedan cubiertas por las equivalentes sin tilde.
 TRIGGERS_ORDENES_SALIDA = {
-    "ver ordenes de salida", "ver órdenes de salida",
-    "ordenes de salida", "órdenes de salida",
-    "aprobar remisiones", "aprobar remisión",
-    "aprobar ordenes", "aprobar órdenes",
-    "aprobar ordenes de salida", "aprobar órdenes de salida",
+    "ver ordenes de salida", "ordenes de salida",
+    "aprobar remisiones", "aprobar remision",
+    "aprobar ordenes", "aprobar ordenes de salida",
 }
+
+
+def _normalizar_texto(texto: str) -> str:
+    """Normaliza la entrada del usuario para comparaciones exactas:
+    trim + minúsculas + REMOCIÓN de acentos/diacríticos (NFD + descarte de
+    combining). Así 'órdenes', 'ÓRDENES' y 'ordenes' coinciden sin mantener
+    variantes duplicadas en los sets de triggers."""
+    t = unicodedata.normalize("NFD", (texto or ""))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return t.strip().lower()
 
 
 def _parsear_numero(texto: str) -> Optional[float]:
@@ -382,12 +393,73 @@ def _parsear_numero(texto: str) -> Optional[float]:
         return None
 
 
+async def preparar_flujo_valorizacion(telefono: str, usuario_id: int, bodega_id: int,
+                                      contexto: Dict[str, Any], remision: Dict[str, Any]) -> str:
+    """Paso 2 del flujo de Contabilidad, compartido por el menú interactivo y
+    el código directo: valida que la remisión sea una Orden de Salida aprobable,
+    consulta la bodega/país, sugiere la tasa del dólar (currency_service) y
+    prepara el contexto para el paso 3 (valor del dólar + precios por kilo).
+    Devuelve el texto de respuesta para el usuario."""
+    numero = remision["numero"]
+    if (remision.get("estado") or "").upper() != "ORDEN_SALIDA":
+        contexto["accion_pendiente"] = {}
+        return (f"La remisión {numero} está en estado {remision.get('estado')}; "
+                f"solo se aprueban Órdenes de Salida.")
+    if not remision.get("movimientos"):
+        contexto["accion_pendiente"] = {}
+        return f"La Orden {numero} no tiene materiales registrados."
+    # Info de la bodega: país/moneda para la tasa del dólar.
+    bodegas = await asyncio.to_thread(lambda: supabase.table("bodegas")
+                                      .select("*").eq("id", bodega_id).limit(1).execute())
+    filas_b = getattr(bodegas, "data", None) or [{}]
+    info = (filas_b[0] if filas_b else {}) or {}
+    pais = info.get("pais") or "Colombia"
+    moneda = info.get("moneda") or ""
+    tasa = await obtener_tasa_dolar(pais=pais, moneda=moneda)
+    tasa_txt = f"{tasa:,.2f}" if tasa else "no disponible (podrás escribirla manualmente)"
+    items = [
+        {"movimiento_id": m["id"],
+         "material_nombre": (m.get("materiales") or {}).get("nombre", "Material"),
+         "cantidad_kg": abs(float(m["cantidad_kg"]))}
+        for m in remision["movimientos"]
+    ]
+    contexto["accion_pendiente"] = {
+        "tipo": "espera_valor_dolar_dia",
+        "remision_id": remision["id"],
+        "numero": numero, "pais": pais, "moneda": moneda,
+        "tasa_sugerida": tasa, "items": items, "precios": {},
+    }
+    await guardar_contexto(usuario_id, contexto)
+    return (
+        f"Orden de Salida {numero} — {len(items)} material(es).\n"
+        f"💵 Tasa sugerida del dólar ({pais}): {tasa_txt}\n\n"
+        f"Ingrese el Valor_dolar_dia a fijar en la remisión:"
+    )
+
+
 async def iniciar_aprobacion_orden_salida(telefono: str, usuario_id: int,
-                                          bodega_id: int, contexto: Dict[str, Any]) -> None:
+                                          bodega_id: int, contexto: Dict[str, Any],
+                                          numero_directo: Optional[str] = None) -> None:
     """Flujo de Contabilidad, paso 1: consulta las últimas 3 remisiones en
     estado 'ORDEN_SALIDA' de la bodega y muestra el menú de selección con
-    botones interactivos de WhatsApp."""
+    botones interactivos de WhatsApp.
+
+    Si se pasa `numero_directo` (ej. 'REM_1001' desde el código 'OS-1001'),
+    se omite el menú y se salta directo a la valorización de esa orden."""
+    if numero_directo:
+        remision = await asyncio.to_thread(inventario.obtener_remision, numero_directo)
+        if not remision:
+            await enviar_mensaje_whatsapp(
+                telefono, f"No encontré la Orden '{numero_directo}'. "
+                          f"Escribe 'ver ordenes de salida' para ver las pendientes.")
+            return
+        logger.info(f"Código directo de Orden de Salida: {numero_directo} "
+                    f"(remision_id={remision['id']}, estado={remision.get('estado')})")
+        respuesta = await preparar_flujo_valorizacion(telefono, usuario_id, bodega_id, contexto, remision)
+        await enviar_mensaje_whatsapp(telefono, respuesta)
+        return
     ordenes = await asyncio.to_thread(inventario.obtener_ordenes_salida, bodega_id, 3)
+    logger.info(f"Resultado consulta Supabase remisiones (ORDEN_SALIDA, bodega={bodega_id}): {ordenes}")
     if not ordenes:
         await enviar_mensaje_whatsapp(
             telefono, "No hay Órdenes de Salida pendientes de valoración en tu bodega.")
@@ -415,7 +487,8 @@ async def inferir_datos_ia(usuario: Dict[str, Any], bodega_id: int, fecha_mensaj
                           fecha_mensaje=fecha_mensaje, borrador=borrador),
             texto,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"⚠️ IA (DeepSeek) no disponible o falló la interpretación: {exc}")
         return None
     datos = fusionar_borrador(borrador, ai)
     # Safety net: si la IA colocó en `merma_kg` la cantidad de un material
@@ -895,8 +968,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         or message.get("interactive", {}).get("button_reply", {}).get("id", "")
         or message.get("interactive", {}).get("list_reply", {}).get("id", "")
     )
-    texto_normalizado = texto_recibido.strip().lower()
+    texto_normalizado = _normalizar_texto(texto_recibido)
     texto = texto_recibido.strip()
+    logger.info(f"Texto recibido procesado: '{texto_normalizado}'")
     if tipo_mensaje == "interactive":
         interactivo = message.get("interactive", {})
         if interactivo.get("type") not in {"button_reply", "list_reply"}:
@@ -1076,47 +1150,14 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             elif accion["tipo"] == "orden_salida_menu":
                 # Paso 2: el usuario (Contabilidad) selecciona una Orden de Salida
                 # (por botón interactivo —llega su id, que es el número— o tipeándolo).
-                numero = texto.strip().upper()
-                if not numero.startswith("REM_"):
-                    numero = f"REM_{numero}"
-                remision = await asyncio.to_thread(inventario.obtener_remision, numero)
+                # obtener_remision es tolerante a variantes: '101', 'REM_101',
+                # 'OS-1001', 'os 1001', etc.
+                remision = await asyncio.to_thread(inventario.obtener_remision, texto.strip())
                 if not remision:
-                    respuesta_texto = f"No encontré la Orden '{numero}'. Escribe el número o usa los botones."
-                elif (remision.get("estado") or "").upper() != "ORDEN_SALIDA":
-                    respuesta_texto = (f"La remisión {numero} está en estado "
-                                       f"{remision.get('estado')}; solo se aprueban Órdenes de Salida.")
-                    contexto["accion_pendiente"] = {}
-                elif not remision.get("movimientos"):
-                    respuesta_texto = f"La Orden {numero} no tiene materiales registrados."
-                    contexto["accion_pendiente"] = {}
+                    respuesta_texto = f"No encontré la Orden '{texto.strip()}'. Escribe el número o usa los botones."
                 else:
-                    # Info de la bodega: país/moneda para la tasa del dólar.
-                    bodegas = await asyncio.to_thread(lambda: supabase.table("bodegas")
-                                                      .select("*").eq("id", bodega_id).limit(1).execute())
-                    filas_b = getattr(bodegas, "data", None) or [{}]
-                    info = (filas_b[0] if filas_b else {}) or {}
-                    pais = info.get("pais") or "Colombia"
-                    moneda = info.get("moneda") or ""
-                    tasa = await obtener_tasa_dolar(pais=pais, moneda=moneda)
-                    tasa_txt = f"{tasa:,.2f}" if tasa else "no disponible (podrás escribirla manualmente)"
-                    items = [
-                        {"movimiento_id": m["id"],
-                         "material_nombre": (m.get("materiales") or {}).get("nombre", "Material"),
-                         "cantidad_kg": abs(float(m["cantidad_kg"]))}
-                        for m in remision["movimientos"]
-                    ]
-                    orden = next((o for o in accion.get("ordenes", []) if o["numero"] == numero), None)
-                    contexto["accion_pendiente"] = {
-                        "tipo": "espera_valor_dolar_dia",
-                        "remision_id": orden["remision_id"] if orden else remision["id"],
-                        "numero": numero, "pais": pais, "moneda": moneda,
-                        "tasa_sugerida": tasa, "items": items, "precios": {},
-                    }
-                    respuesta_texto = (
-                        f"Orden de Salida {numero} — {len(items)} material(es).\n"
-                        f"💵 Tasa sugerida del dólar ({pais}): {tasa_txt}\n\n"
-                        f"Ingrese el Valor_dolar_dia a fijar en la remisión:"
-                    )
+                    respuesta_texto = await preparar_flujo_valorizacion(
+                        telefono, usuario_id, bodega_id, contexto, remision)
             elif accion["tipo"] == "espera_valor_dolar_dia":
                 # Paso 3: captura del valor del dólar del día.
                 valor = _parsear_numero(texto)
@@ -1382,6 +1423,15 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         contexto["accion_pendiente"] = {"tipo": "correccion_cliente_nombre"}
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿Cuál cliente deseas corregir? (nombre)")
+        return
+    # Código directo de Orden de Salida (ej. "OS-1001", "os 1001", "OS_1001"):
+    # omite el menú y entra directo a la valorización de esa orden.
+    m_codigo_os = re.fullmatch(r"os[-_ ]?(\d{1,10})", texto_normalizado)
+    if m_codigo_os:
+        await iniciar_aprobacion_orden_salida(
+            telefono, usuario_id, bodega_id, contexto,
+            numero_directo=f"REM_{m_codigo_os.group(1)}",
+        )
         return
     if texto_normalizado in TRIGGERS_ORDENES_SALIDA:
         await iniciar_aprobacion_orden_salida(telefono, usuario_id, bodega_id, contexto)
@@ -1679,7 +1729,12 @@ async def procesar_webhook(data: Dict[str, Any]) -> None:
                     if len(_mensajes_whatsapp_procesados) > _MAX_MENSAJES_PROCESADOS:
                         _mensajes_whatsapp_procesados.clear()
                 logger.info(f"📨 Mensaje nuevo: {message}")
-                await procesar_un_mensaje(message, value.get("contacts", []))
+                try:
+                    await procesar_un_mensaje(message, value.get("contacts", []))
+                except Exception:
+                    # NUNCA silenciar: una excepción aquí (error de PostgREST,
+                    # red, bug) deja al bot mudo sin que el operador lo note.
+                    logger.exception("❌ Error no controlado procesando el mensaje de WhatsApp")
 
 
 # Endpoints HTTP / Webhook API

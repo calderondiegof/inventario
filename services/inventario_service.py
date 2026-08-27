@@ -763,13 +763,27 @@ class InventarioServiceConValidacion:
         return actualizado[0]
 
     def obtener_remision(self, numero: str) -> Optional[Dict[str, Any]]:
-        numero = (numero or "").strip().upper()
-        if not numero.startswith("REM_"):
-            numero = f"REM_{numero}"
-        filas = self.supabase.table("remisiones").select("*").eq("numero", numero).execute().data
-        if not filas:
+        """Busca una remisión por número tolerando variantes de escritura:
+        '101', 'REM_101', 'rem 101', 'OS-1001', 'os_1001' (se prueban los
+        candidatos en orden hasta encontrar coincidencia en BD)."""
+        limpio = (numero or "").strip().upper().replace(" ", "")
+        digitos = re.sub(r"\D", "", limpio)
+        if limpio.startswith("REM_"):
+            candidatos = [limpio, f"REM_{digitos}"] if digitos else [limpio]
+        elif limpio.startswith("OS"):
+            candidatos = [limpio, f"OS-{digitos}", f"OS_{digitos}", f"REM_{digitos}"] if digitos else [limpio]
+        else:
+            candidatos = [limpio, f"REM_{limpio}", f"REM_{digitos}"] if digitos else [limpio]
+        vistos: set = set()
+        candidatos = [c for c in candidatos if c and not (c in vistos or vistos.add(c))]
+        remision = None
+        for cand in candidatos:
+            filas = self.supabase.table("remisiones").select("*").eq("numero", cand).execute().data
+            if filas:
+                remision = filas[0]
+                break
+        if not remision:
             return None
-        remision = filas[0]
         movimientos = self.supabase.table("movimientos_inventario").select(
             "id,material_id,cantidad_kg,anulado,precio_unitario,materiales(nombre)"
         ).eq("lote_operacion_id", remision["lote_operacion_id"]).eq("anulado", False).execute().data or []
