@@ -695,9 +695,11 @@ class InventarioServiceConValidacion:
             conductor_id=(conductor_registro or {}).get("id"),
             bodega_id=bodega_id, 
             fecha_operacion=fecha,
+            estado="ORDEN_SALIDA",
         )
         return {"lote_id": lote_id, "registros": registros, "cliente": cliente_registro,
-                "conductor": conductor_registro, "numero_remision": numero_remision}
+                "conductor": conductor_registro, "numero_remision": numero_remision,
+                "estado": "ORDEN_SALIDA"}
 
         
     def generar_numero_remision(self) -> str:
@@ -726,10 +728,14 @@ class InventarioServiceConValidacion:
 
     def registrar_remision(self, *, numero: str, lote_operacion_id: str, cliente_id: int, 
                            bodega_id: int, fecha_operacion: str,
-                           conductor_id: Optional[int] = None):
+                           conductor_id: Optional[int] = None,
+                           estado: str = "ORDEN_SALIDA"):
         
         # La remisión solo guarda referencias: cliente_id y conductor_id.
         # Los datos completos del cliente y del conductor viven en sus respectivas tablas.
+        # Flujo "Orden de Salida -> Remisión Aprobada": toda venta/despacho nace como
+        # 'ORDEN_SALIDA' (sin precios) y solo Contabilidad la pasa a 'APROBADA'
+        # (vía RPC aprobar_remision_con_precios) o 'ANULADA'.
         data = {
             "numero": numero,
             "lote_operacion_id": lote_operacion_id,
@@ -737,7 +743,7 @@ class InventarioServiceConValidacion:
             "conductor_id": conductor_id,
             "bodega_id": bodega_id,
             "fecha_operacion": fecha_operacion,
-            "estado": "ACTIVA",
+            "estado": estado,
         }
         
         self.supabase.table("remisiones").insert(data).execute()
@@ -765,10 +771,45 @@ class InventarioServiceConValidacion:
             return None
         remision = filas[0]
         movimientos = self.supabase.table("movimientos_inventario").select(
-            "id,material_id,cantidad_kg,anulado,materiales(nombre)"
+            "id,material_id,cantidad_kg,anulado,precio_unitario,materiales(nombre)"
         ).eq("lote_operacion_id", remision["lote_operacion_id"]).eq("anulado", False).execute().data or []
         remision["movimientos"] = movimientos
         return remision
+
+    def obtener_ordenes_salida(self, bodega_id: int, limite: int = 3) -> List[Dict[str, Any]]:
+        """Últimas remisiones en estado 'ORDEN_SALIDA' de una bodega: las órdenes
+        de despacho que quedaron sin valorizar y esperan aprobación de Contabilidad.
+
+        Devuelve las más recientes primero (id descendente), limitadas a `limite`.
+        """
+        filas = (self.supabase.table("remisiones")
+                 .select("id,numero,fecha_operacion,estado,bodega_id")
+                 .eq("estado", "ORDEN_SALIDA")
+                 .eq("bodega_id", bodega_id)
+                 .order("id", desc=True)
+                 .limit(limite)
+                 .execute().data or [])
+        return filas
+
+    def aprobar_remision_con_precios(self, remision_id: int, vr_dolar_dia: float,
+                                     precios: Dict[int, float]) -> Dict[str, Any]:
+        """Ejecuta la RPC 'aprobar_remision_con_precios' (transacción atómica):
+        fija remisiones.vr_dolar_dia, marca estado='APROBADA' y guarda el
+        precio_unitario (por kilogramo) de cada movimiento del lote.
+
+        `precios`: {movimiento_id: precio_unitario} — se envía como JSONB
+        con claves de texto, tal como espera la función PostgreSQL.
+        """
+        precios_items = {str(mov_id): float(p) for mov_id, p in precios.items()}
+        respuesta = self.supabase.rpc("aprobar_remision_con_precios", {
+            "p_remision_id": int(remision_id),
+            "p_vr_dolar_dia": float(vr_dolar_dia),
+            "p_precios_items": precios_items,
+        }).execute()
+        datos = getattr(respuesta, "data", None)
+        if isinstance(datos, list):
+            datos = datos[0] if datos else {}
+        return datos if isinstance(datos, dict) else {}
 
     def obtener_datos_pdf_remision(self, numero: str) -> Dict[str, Any]:
         """Reúne todos los datos necesarios para regenerar el PDF de una remisión
@@ -795,16 +836,25 @@ class InventarioServiceConValidacion:
                 conductor = filas[0]
 
         # Los movimientos de una venta se guardan con cantidad_kg negativa; el
-        # PDF muestra valores positivos, igual que en la venta original.
+        # PDF muestra valores positivos, igual que en la venta original. El
+        # precio_unitario (si existe) permite renderizar el PDF 'APROBADA'
+        # con conversiones a dólar; en 'ORDEN_SALIDA' viene vacío y el PDF
+        # omite las columnas financieras.
         items = []
         for m in remision.get("movimientos", []):
             nombre = (m.get("materiales") or {}).get("nombre", "Material")
-            items.append({"material_nombre": nombre, "cantidad_kg": abs(float(m["cantidad_kg"]))})
+            items.append({
+                "material_nombre": nombre,
+                "cantidad_kg": abs(float(m["cantidad_kg"])),
+                "precio_unitario": m.get("precio_unitario"),
+            })
 
         return {
             "numero_remision": remision["numero"],
             "fecha_operacion": remision.get("fecha_operacion"),
             "bodega_id": remision.get("bodega_id"),
+            "estado": remision.get("estado"),
+            "vr_dolar_dia": remision.get("vr_dolar_dia"),
             "cliente": cliente,
             "conductor": conductor,
             "items": items,

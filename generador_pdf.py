@@ -30,6 +30,45 @@ COLUMNAS_TABLA = [
     ("VR TOTAL DÓLAR", 73),
 ]
 ANCHO_TABLA = sum(w for _, w in COLUMNAS_TABLA)   # 544 (modelo: x 31 -> 575)
+
+# Orden de Salida (estado='ORDEN_SALIDA'): SIN columnas financieras.
+# Mantiene el mismo ancho total del modelo (544) para respetar el marco.
+COLUMNAS_TABLA_ORDEN_SALIDA = [
+    ("MATERIAL", 350),
+    ("CANTIDAD KG", 194),
+]
+ANCHO_TABLA_ORDEN_SALIDA = sum(w for _, w in COLUMNAS_TABLA_ORDEN_SALIDA)
+
+# Modos de impresión de valores de la Remisión Aprobada (elección del usuario
+# de Contabilidad al terminar la captura de precios). Todos los juegos de
+# columnas conservan el ancho total del modelo (544) para respetar el marco.
+COLUMNAS_TABLA_MONEDA_LOCAL = [
+    ("MATERIAL", 200),
+    ("CANTIDAD KG", 100),
+    ("VR X KILO", 120),
+    ("VR TOTAL PESOS", 124),
+]
+COLUMNAS_TABLA_DOLARES = [
+    ("MATERIAL", 200),
+    ("CANTIDAD KG", 100),
+    ("VR KILO DÓLAR", 120),
+    ("VR TOTAL DÓLAR", 124),
+]
+COLUMNAS_TABLA_AMBAS = [
+    ("MATERIAL", 140),
+    ("CANTIDAD KG", 80),
+    ("VR X KILO", 80),
+    ("VR TOTAL PESOS", 84),
+    ("VR KILO DÓLAR", 78),
+    ("VR TOTAL DÓLAR", 82),
+]
+ANCHO_TABLA_MODOS = {
+    "MONEDA_LOCAL": sum(w for _, w in COLUMNAS_TABLA_MONEDA_LOCAL),
+    "DOLARES": sum(w for _, w in COLUMNAS_TABLA_DOLARES),
+    "AMBAS": sum(w for _, w in COLUMNAS_TABLA_AMBAS),
+    "SIN_VALORES": ANCHO_TABLA_ORDEN_SALIDA,
+}
+MODOS_VALORES = {"MONEDA_LOCAL", "DOLARES", "AMBAS", "SIN_VALORES"}
 FILAS_TABLA = 10
 ALTO_FILA = 15.3           # alto de fila del modelo (183.8 / 12 filas)
 Y_TABLA = 639              # borde superior de la tabla (modelo: top 153)
@@ -53,7 +92,8 @@ def _campo_con_linea(c: canvas.Canvas, label: str, valor: Optional[str], x: floa
 
 
 def _encabezado(c: canvas.Canvas, *, fecha: str, cliente: str, documento: Optional[str], direccion: Optional[str],
-                 celular: Optional[str], numero_remision: str) -> float:
+                 celular: Optional[str], numero_remision: str, estado: Optional[str] = None,
+                 vr_dolar_dia: Optional[float] = None, modo_valores: Optional[str] = None) -> float:
     """Encabezado replicando el modelo REM_MODELO (posiciones absolutas)."""
 
     # --- Logo (modelo: caja x 447-571, top 14-123 => y 669-778) ---
@@ -69,8 +109,14 @@ def _encabezado(c: canvas.Canvas, *, fecha: str, cliente: str, documento: Option
             pass  # el logo no debe impedir generar la remisión
 
     # --- Título (modelo: "Remision Salida" x328/top28; "de Material" x357/top44) ---
-    _texto(c, 328, 753, "Remision Salida", tam=11, negrita=True)
-    _texto(c, 357, 738, "de Material", tam=11, negrita=True)
+    # Con el flujo "Orden de Salida -> Remisión Aprobada", si la remisión está en
+    # estado 'ORDEN_SALIDA' el documento es una ORDEN DE SALIDA (sin precios).
+    if estado == "ORDEN_SALIDA":
+        _texto(c, 322, 753, "ORDEN DE SALIDA", tam=11, negrita=True)
+        _texto(c, 350, 738, "DE MATERIAL", tam=11, negrita=True)
+    else:
+        _texto(c, 328, 753, "Remision Salida", tam=11, negrita=True)
+        _texto(c, 357, 738, "de Material", tam=11, negrita=True)
 
     # --- Datos del cliente (izquierda; etiquetas x33, líneas 122->307) ---
     _campo_con_linea(c, "Cliente:", cliente, MARGEN_IZQ, 758, 122, 307)
@@ -88,19 +134,56 @@ def _encabezado(c: canvas.Canvas, *, fecha: str, cliente: str, documento: Option
     # --- Fecha (derecha, bajo el N°; zona libre en el modelo) ---
     _texto(c, 359, 678, f"Fecha: {fecha}", tam=9, negrita=True)
 
+    # --- Valor Dólar del Día: solo si el modo elegido incluye dólares ---
+    # (modo 'DOLARES' o 'AMBAS'); en 'MONEDA_LOCAL' y 'SIN_VALORES' se omite.
+    modo = (modo_valores or "").upper()
+    if modo in {"DOLARES", "AMBAS"} and vr_dolar_dia:
+        _texto(c, 359, 662, f"Valor Dólar del Día: ${float(vr_dolar_dia):,.2f}", tam=9, negrita=True)
+
     # La tabla inicia en una posición fija del modelo.
     return Y_TABLA
 
 
-def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, Any]]) -> float:
+def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, Any]], *,
+                      estado: Optional[str] = None, vr_dolar_dia: Optional[float] = None,
+                      modo_valores: Optional[str] = None) -> float:
+    """Tabla de materiales del documento.
+
+    `modo_valores` (elección del usuario de Contabilidad) tiene prioridad y
+    define las columnas financieras visibles de la Remisión Aprobada:
+      - 'MONEDA_LOCAL'  -> MATERIAL, CANTIDAD KG, VR X KILO, VR TOTAL PESOS.
+      - 'DOLARES'       -> MATERIAL, CANTIDAD KG, VR KILO DÓLAR, VR TOTAL DÓLAR.
+      - 'AMBAS'         -> las seis columnas (locales + dólar).
+      - 'SIN_VALORES'   -> solo MATERIAL y CANTIDAD KG.
+    Cálculos aplicados cuando corresponde:
+      VR X KILO = precio_unitario · VR TOTAL PESOS = precio_unitario * kg
+      VR KILO DÓLAR = precio / vr_dolar_dia · VR TOTAL DÓLAR = (precio / tasa) * kg
+    La fila TOTALES acumula las columnas visibles.
+
+    Sin `modo_valores` (compatibilidad): estado='ORDEN_SALIDA' -> solo MATERIAL
+    y CANTIDAD KG; cualquier otro estado -> columnas completas del modelo.
+    """
     x = X_TABLA
     y = y_inicio
+    modo = (modo_valores or "").upper()
+    if modo == "SIN_VALORES":
+        columnas, ancho_tabla = COLUMNAS_TABLA_ORDEN_SALIDA, ANCHO_TABLA_ORDEN_SALIDA
+    elif modo == "MONEDA_LOCAL":
+        columnas, ancho_tabla = COLUMNAS_TABLA_MONEDA_LOCAL, ANCHO_TABLA_MODOS["MONEDA_LOCAL"]
+    elif modo == "DOLARES":
+        columnas, ancho_tabla = COLUMNAS_TABLA_DOLARES, ANCHO_TABLA_MODOS["DOLARES"]
+    elif modo == "AMBAS":
+        columnas, ancho_tabla = COLUMNAS_TABLA_AMBAS, ANCHO_TABLA_MODOS["AMBAS"]
+    else:
+        columnas = COLUMNAS_TABLA_ORDEN_SALIDA if estado == "ORDEN_SALIDA" else COLUMNAS_TABLA
+        ancho_tabla = ANCHO_TABLA_ORDEN_SALIDA if estado == "ORDEN_SALIDA" else ANCHO_TABLA
+    dolar = float(vr_dolar_dia) if vr_dolar_dia else 0.0
 
     # Encabezado de tabla
     c.setLineWidth(0.7)
-    c.rect(x, y - ALTO_FILA, ANCHO_TABLA, ALTO_FILA)
+    c.rect(x, y - ALTO_FILA, ancho_tabla, ALTO_FILA)
     cx = x
-    for nombre_col, ancho_col in COLUMNAS_TABLA:
+    for nombre_col, ancho_col in columnas:
         c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
         _texto(c, cx, y - ALTO_FILA + 5, nombre_col, tam=7, negrita=True, centrado=True, ancho_centro=ancho_col)
         cx += ancho_col
@@ -113,7 +196,7 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
     for i in range(FILAS_TABLA):
         cx = x
         item = items[i] if i < len(items) else None
-        for nombre_col, ancho_col in COLUMNAS_TABLA:
+        for nombre_col, ancho_col in columnas:
             c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
             if item:
                 valor = ""
@@ -134,6 +217,17 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
                     if subtotal:
                         total_pesos += subtotal
                         valor = f"{subtotal:,.0f}"
+                elif nombre_col == "VR KILO DÓLAR":
+                    precio = float(item.get("precio_unitario", 0) or 0)
+                    if precio and dolar:
+                        valor = f"{precio / dolar:,.2f}"
+                elif nombre_col == "VR TOTAL DÓLAR":
+                    cantidad = float(item.get("cantidad_kg", 0) or 0)
+                    precio = float(item.get("precio_unitario", 0) or 0)
+                    subtotal_dolar = (cantidad * precio) / dolar if dolar and precio else 0.0
+                    if subtotal_dolar:
+                        total_dolar += subtotal_dolar
+                        valor = f"{subtotal_dolar:,.2f}"
                 if valor:
                     _texto(c, cx + 3, y - ALTO_FILA + 5, valor, tam=8)
             cx += ancho_col
@@ -141,7 +235,7 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
 
     # Fila de totales
     cx = x
-    for idx, (nombre_col, ancho_col) in enumerate(COLUMNAS_TABLA):
+    for idx, (nombre_col, ancho_col) in enumerate(columnas):
         c.rect(cx, y - ALTO_FILA, ancho_col, ALTO_FILA)
         if idx == 0:
             _texto(c, cx, y - ALTO_FILA + 5, "TOTALES", tam=8, negrita=True, centrado=True, ancho_centro=ancho_col)
@@ -149,6 +243,8 @@ def _tabla_materiales(c: canvas.Canvas, y_inicio: float, items: List[Dict[str, A
             _texto(c, cx + 3, y - ALTO_FILA + 5, f"{total_kg:,.2f}", tam=8, negrita=True)
         elif nombre_col == "VR TOTAL PESOS":
             _texto(c, cx + 3, y - ALTO_FILA + 5, f"{total_pesos:,.0f}", tam=8, negrita=True)
+        elif nombre_col == "VR TOTAL DÓLAR":
+            _texto(c, cx + 3, y - ALTO_FILA + 5, f"{total_dolar:,.2f}", tam=8, negrita=True)
         cx += ancho_col
     y -= ALTO_FILA
 
@@ -226,21 +322,46 @@ def generar_remision_pdf_archivo(
     items: Optional[List[Dict[str, Any]]] = None,
     numero_remision: str = "SIN-NUMERO",
     bodega_id: Optional[int] = None,
+    estado: Optional[str] = None,
+    vr_dolar_dia: Optional[float] = None,
+    modo_valores: Optional[str] = None,
 ) -> str:
     """
     Genera la remisión de salida de material de FERROMA en formato PDF,
     replicando el modelo REM_MODELO.pdf, y la guarda en `ruta_salida`.
+
+    Flujo "Orden de Salida -> Remisión Aprobada":
+      - estado='ORDEN_SALIDA': el documento es una ORDEN DE SALIDA DE MATERIAL
+        (título cambiado) y se OMITEN todas las columnas/campos financieros
+        (precio por kilo, totales en pesos y conversiones a dólar). Solo se
+        muestran Material, Cantidad (kg), datos del Cliente, Conductor y Vehículo.
+      - estado='APROBADA' (o None, comportamiento legacy): PDF del modelo con
+        precios por kilo, totales en pesos y conversiones a dólar (si se pasa
+        `vr_dolar_dia` y los items traen `precio_unitario`).
+
+    `modo_valores` (elección del usuario de Contabilidad) controla qué valores
+    se imprimen en la Remisión Aprobada:
+      - 'MONEDA_LOCAL': Material, Cantidad (kg), VR X KILO, VR TOTAL PESOS.
+      - 'DOLARES':      Material, Cantidad (kg), VR KILO DÓLAR, VR TOTAL DÓLAR
+                        (encabezado con 'Valor Dólar del Día: $XXXX').
+      - 'AMBAS':        las seis columnas (locales + dólar) y el valor del dólar.
+      - 'SIN_VALORES':  solo Material y Cantidad (kg), sin campos financieros.
+    Tiene prioridad sobre la selección de columnas por `estado`; si no se pasa,
+    se conserva el comportamiento por estado descrito arriba.
     """
     items = items or []
 
     c = canvas.Canvas(ruta_salida, pagesize=letter)
-    c.setTitle(f"Remision {numero_remision}")
+    prefijo_doc = "OrdenSalida" if estado == "ORDEN_SALIDA" else "Remision"
+    c.setTitle(f"{prefijo_doc} {numero_remision}")
 
     y = _encabezado(
         c, fecha=fecha, cliente=cliente, documento=documento,
         direccion=direccion, celular=celular, numero_remision=numero_remision,
+        estado=estado, vr_dolar_dia=vr_dolar_dia, modo_valores=modo_valores,
     )
-    y = _tabla_materiales(c, y, items)
+    y = _tabla_materiales(c, y, items, estado=estado, vr_dolar_dia=vr_dolar_dia,
+                          modo_valores=modo_valores)
     y = _observaciones(c, y)
     _datos_conductor(
         c, y, conductor=conductor, id_conductor=id_conductor,

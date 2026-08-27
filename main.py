@@ -21,6 +21,7 @@ from supabase import Client, create_client
 from reporte_grafico import generar_y_subir_grafico_stock
 from generador_pdf import generar_remision_pdf_archivo
 from services.inventario_service import InventarioServiceConValidacion, normalizar
+from services.currency_service import obtener_tasa_dolar
 
 # Configuración de Logging
 logging.basicConfig(level=logging.INFO)
@@ -347,6 +348,61 @@ async def pedir_movimientos_material(telefono: str, usuario_id: int, contexto: D
     contexto["campo_esperado"] = None
     await guardar_contexto(usuario_id, contexto)
     await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+
+
+# Frases que activan el flujo de aprobación de Contabilidad (Orden de Salida
+# -> Remisión Aprobada). Se normalizan a minúsculas.
+TRIGGERS_ORDENES_SALIDA = {
+    "ver ordenes de salida", "ver órdenes de salida",
+    "ordenes de salida", "órdenes de salida",
+    "aprobar remisiones", "aprobar remisión",
+    "aprobar ordenes", "aprobar órdenes",
+    "aprobar ordenes de salida", "aprobar órdenes de salida",
+}
+
+
+def _parsear_numero(texto: str) -> Optional[float]:
+    """Parsea un número escrito con formato español o inglés:
+    '4120,50' -> 4120.5 | '1.250.000' -> 1250000 | '1,250.50' -> 1250.5.
+    Devuelve None si no es un número válido."""
+    t = (texto or "").strip().replace(" ", "").replace("$", "")
+    if not t:
+        return None
+    if "," in t and "." in t:
+        # Ambos separadores: el último es el decimal.
+        if t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            t = t.replace(",", "")
+    elif "," in t:
+        t = t.replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+async def iniciar_aprobacion_orden_salida(telefono: str, usuario_id: int,
+                                          bodega_id: int, contexto: Dict[str, Any]) -> None:
+    """Flujo de Contabilidad, paso 1: consulta las últimas 3 remisiones en
+    estado 'ORDEN_SALIDA' de la bodega y muestra el menú de selección con
+    botones interactivos de WhatsApp."""
+    ordenes = await asyncio.to_thread(inventario.obtener_ordenes_salida, bodega_id, 3)
+    if not ordenes:
+        await enviar_mensaje_whatsapp(
+            telefono, "No hay Órdenes de Salida pendientes de valoración en tu bodega.")
+        return
+    contexto["accion_pendiente"] = {
+        "tipo": "orden_salida_menu",
+        "ordenes": [{"remision_id": o["id"], "numero": o["numero"]} for o in ordenes],
+    }
+    await guardar_contexto(usuario_id, contexto)
+    lista = "\n".join(f"• {o['numero']} — fecha {o.get('fecha_operacion') or 'n/d'}" for o in ordenes)
+    await enviar_botones_whatsapp(
+        telefono,
+        f"Órdenes de Salida pendientes de valoración:\n\n{lista}\n\nSelecciona la que deseas aprobar:",
+        [(o["numero"], o["numero"]) for o in ordenes[:3]],
+    )
 
 
 async def inferir_datos_ia(usuario: Dict[str, Any], bodega_id: int, fecha_mensaje: str,
@@ -810,6 +866,10 @@ async def regenerar_y_enviar_pdf_remision(telefono: str, bodega_id: int, numero:
             items=datos.get("items", []),
             numero_remision=numero_remision,
             bodega_id=bodega_id,
+            # El PDF se adapta al estado: 'ORDEN_SALIDA' sin precios,
+            # 'APROBADA' completo con conversiones a dólar.
+            estado=datos.get("estado"),
+            vr_dolar_dia=datos.get("vr_dolar_dia"),
         )
         await enviar_documento_whatsapp(
             destino=telefono,
@@ -1008,6 +1068,175 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     await asyncio.to_thread(inventario.actualizar_cliente, accion["cliente_id"], campos)
                     respuesta_texto = f"Datos de {accion['cliente_nombre']} actualizados."
                     contexto["accion_pendiente"] = {}
+            elif accion["tipo"] == "orden_salida_menu":
+                # Paso 2: el usuario (Contabilidad) selecciona una Orden de Salida
+                # (por botón interactivo —llega su id, que es el número— o tipeándolo).
+                numero = texto.strip().upper()
+                if not numero.startswith("REM_"):
+                    numero = f"REM_{numero}"
+                remision = await asyncio.to_thread(inventario.obtener_remision, numero)
+                if not remision:
+                    respuesta_texto = f"No encontré la Orden '{numero}'. Escribe el número o usa los botones."
+                elif (remision.get("estado") or "").upper() != "ORDEN_SALIDA":
+                    respuesta_texto = (f"La remisión {numero} está en estado "
+                                       f"{remision.get('estado')}; solo se aprueban Órdenes de Salida.")
+                    contexto["accion_pendiente"] = {}
+                elif not remision.get("movimientos"):
+                    respuesta_texto = f"La Orden {numero} no tiene materiales registrados."
+                    contexto["accion_pendiente"] = {}
+                else:
+                    # Info de la bodega: país/moneda para la tasa del dólar.
+                    bodegas = await asyncio.to_thread(lambda: supabase.table("bodegas")
+                                                      .select("*").eq("id", bodega_id).limit(1).execute())
+                    filas_b = getattr(bodegas, "data", None) or [{}]
+                    info = (filas_b[0] if filas_b else {}) or {}
+                    pais = info.get("pais") or "Colombia"
+                    moneda = info.get("moneda") or ""
+                    tasa = await obtener_tasa_dolar(pais=pais, moneda=moneda)
+                    tasa_txt = f"{tasa:,.2f}" if tasa else "no disponible (podrás escribirla manualmente)"
+                    items = [
+                        {"movimiento_id": m["id"],
+                         "material_nombre": (m.get("materiales") or {}).get("nombre", "Material"),
+                         "cantidad_kg": abs(float(m["cantidad_kg"]))}
+                        for m in remision["movimientos"]
+                    ]
+                    orden = next((o for o in accion.get("ordenes", []) if o["numero"] == numero), None)
+                    contexto["accion_pendiente"] = {
+                        "tipo": "espera_valor_dolar_dia",
+                        "remision_id": orden["remision_id"] if orden else remision["id"],
+                        "numero": numero, "pais": pais, "moneda": moneda,
+                        "tasa_sugerida": tasa, "items": items, "precios": {},
+                    }
+                    respuesta_texto = (
+                        f"Orden de Salida {numero} — {len(items)} material(es).\n"
+                        f"💵 Tasa sugerida del dólar ({pais}): {tasa_txt}\n\n"
+                        f"Ingrese el Valor_dolar_dia a fijar en la remisión:"
+                    )
+            elif accion["tipo"] == "espera_valor_dolar_dia":
+                # Paso 3: captura del valor del dólar del día.
+                valor = _parsear_numero(texto)
+                if valor is None or valor <= 0:
+                    respuesta_texto = ("Valor inválido. Ingrese el valor del dólar del día "
+                                       "(ejemplo: 4120,50) o escriba 'cancelar'.")
+                else:
+                    accion["vr_dolar_dia"] = valor
+                    accion["tipo"] = "captura_precio_material"
+                    accion["indice"] = 0
+                    primer = accion["items"][0]
+                    respuesta_texto = (
+                        f"Valor del dólar fijado: {valor:,.2f}\n\n"
+                        f"Ingrese el precio por kilo (en moneda local) para "
+                        f"{primer['material_nombre']} ({primer['cantidad_kg']:,.2f} kg):"
+                    )
+            elif accion["tipo"] == "captura_precio_material":
+                # Paso 4: bucle de precios por kilo, ítem por ítem; al terminar
+                # se ejecuta la aprobación final (paso 5) vía RPC.
+                precio = _parsear_numero(texto)
+                if precio is None or precio < 0:
+                    respuesta_texto = ("Precio inválido. Ingrese el precio por kilo en moneda local "
+                                       "(ejemplo: 3500) o escriba 'cancelar'.")
+                else:
+                    actual = accion["items"][accion["indice"]]
+                    accion["precios"][str(actual["movimiento_id"])] = precio
+                    accion["indice"] += 1
+                    if accion["indice"] < len(accion["items"]):
+                        sig = accion["items"][accion["indice"]]
+                        respuesta_texto = (
+                            f"Precio registrado: {precio:,.2f}/kg.\n\n"
+                            f"Ingrese el precio por kilo (en moneda local) para "
+                            f"{sig['material_nombre']} ({sig['cantidad_kg']:,.2f} kg):"
+                        )
+                    else:
+                        # Último precio capturado: se pregunta cómo imprimir los
+                        # valores en el PDF antes de aprobar (paso 5).
+                        accion["tipo"] = "seleccion_modo_pdf"
+                        respuesta_texto = (
+                            "¿Cómo deseas que se impriman los valores en el PDF de la Remisión?\n"
+                            "1. Moneda local\n"
+                            "2. Moneda dólares\n"
+                            "3. Ambas monedas\n"
+                            "4. Sin valores"
+                        )
+            elif accion["tipo"] == "seleccion_modo_pdf":
+                # Paso 5: elección del formato de valores del PDF final y
+                # aprobación de la remisión (RPC) + envío del PDF por WhatsApp.
+                modos = {
+                    "1": "MONEDA_LOCAL", "moneda local": "MONEDA_LOCAL",
+                    "2": "DOLARES", "dolares": "DOLARES", "dólares": "DOLARES",
+                    "moneda dolares": "DOLARES", "moneda dólares": "DOLARES",
+                    "3": "AMBAS", "ambas": "AMBAS", "ambas monedas": "AMBAS",
+                    "4": "SIN_VALORES", "sin valores": "SIN_VALORES",
+                }
+                modo = modos.get(texto.strip().lower())
+                if not modo:
+                    respuesta_texto = ("Opción inválida. Responde 1 (Moneda local), 2 (Moneda dólares), "
+                                       "3 (Ambas monedas) o 4 (Sin valores).")
+                else:
+                    await asyncio.to_thread(
+                        inventario.aprobar_remision_con_precios,
+                        accion["remision_id"], accion["vr_dolar_dia"],
+                        {int(k): v for k, v in accion["precios"].items()},
+                    )
+                    datos_pdf = await asyncio.to_thread(
+                        inventario.obtener_datos_pdf_remision, accion["numero"])
+                    total_local = sum(
+                        float(i.get("cantidad_kg") or 0) * float(i.get("precio_unitario") or 0)
+                        for i in datos_pdf.get("items", [])
+                    )
+                    total_dolar = total_local / accion["vr_dolar_dia"] if accion["vr_dolar_dia"] else 0.0
+                    numero_rem = datos_pdf.get("numero_remision") or accion["numero"]
+                    etiqueta_modo = {
+                        "MONEDA_LOCAL": "Moneda local",
+                        "DOLARES": "Moneda dólares",
+                        "AMBAS": "Ambas monedas",
+                        "SIN_VALORES": "Sin valores",
+                    }[modo]
+                    try:
+                        nombre_pdf = f"remision_aprobada_{usuario_id}_{int(datetime.now(BOGOTA).timestamp())}.pdf"
+                        pdf_path = os.path.join(tempfile.gettempdir(), nombre_pdf)
+                        cliente = datos_pdf.get("cliente") or {}
+                        conductor = datos_pdf.get("conductor") or {}
+                        await asyncio.to_thread(
+                            generar_remision_pdf_archivo,
+                            pdf_path,
+                            fecha=datos_pdf.get("fecha_operacion") or "",
+                            cliente=cliente.get("nombre", "") or "",
+                            documento=cliente.get("identificacion"),
+                            direccion=cliente.get("direccion"),
+                            celular=cliente.get("telefono"),
+                            placa=conductor.get("placa"),
+                            conductor=conductor.get("nombre"),
+                            id_conductor=conductor.get("identificacion"),
+                            celular_conductor=conductor.get("telefono"),
+                            items=datos_pdf.get("items", []),
+                            numero_remision=numero_rem,
+                            bodega_id=bodega_id,
+                            estado="APROBADA",
+                            vr_dolar_dia=accion["vr_dolar_dia"],
+                            modo_valores=modo,
+                        )
+                        logger.info(f"📄 Remisión Aprobada generada ({modo}): {pdf_path}")
+                        await enviar_documento_whatsapp(
+                            destino=telefono,
+                            ruta_archivo=pdf_path,
+                            nombre_documento=f"Remision_Aprobada_{numero_rem}.pdf",
+                        )
+                        respuesta_texto = (
+                            f"✅ Remisión Aprobada #{numero_rem}.\n"
+                            f"💵 Valor dólar día: {accion['vr_dolar_dia']:,.2f}\n"
+                            f"🧾 Total valorizado: {total_local:,.2f} {accion.get('moneda') or ''}"
+                            f" (≈ US$ {total_dolar:,.2f})\n"
+                            f"🖨️ PDF generado en modo: {etiqueta_modo}."
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Error generando/enviando PDF de Remisión Aprobada: {e}")
+                        respuesta_texto = (
+                            f"✅ Remisión {numero_rem} APROBADA y precios guardados "
+                            f"({len(accion['precios'])} precio(s)).\n"
+                            f"⚠️ No se pudo generar o enviar el PDF. Intenta corregir la remisión "
+                            f"para regenerarlo."
+                        )
+                    contexto["accion_pendiente"] = {}
             elif accion["tipo"] == "movimientos_material":
                 if texto.lower().strip() in {"cancelar", "salir", "menu"}:
                     contexto["accion_pendiente"] = {}
@@ -1148,6 +1377,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         contexto["accion_pendiente"] = {"tipo": "correccion_cliente_nombre"}
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "¿Cuál cliente deseas corregir? (nombre)")
+        return
+    if texto_normalizado in TRIGGERS_ORDENES_SALIDA:
+        await iniciar_aprobacion_orden_salida(telefono, usuario_id, bodega_id, contexto)
         return
     if texto.lower() in {"ver grafico", "ver gráfico", "reporte visual"}:
         url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)
@@ -1356,8 +1588,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             )
 
             pdf_path = None
+            numero_orden = r.get("numero_remision", "SIN-NUMERO")
             try:
-                nombre_pdf = f"remision_{usuario_id}_{int(datetime.now(BOGOTA).timestamp())}.pdf"
+                nombre_pdf = f"orden_salida_{usuario_id}_{int(datetime.now(BOGOTA).timestamp())}.pdf"
                 pdf_path = os.path.join(tempfile.gettempdir(), nombre_pdf)
                 conductor_reg = r.get("conductor") or {}
                 await asyncio.to_thread(
@@ -1373,25 +1606,34 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     id_conductor=datos.get("cliente_conductor_id") or conductor_reg.get("identificacion"),
                     celular_conductor=datos.get("cliente_conductor_telefono") or conductor_reg.get("telefono"),
                     items=datos.get("items", []),
-                    numero_remision=r.get("numero_remision", "SIN-NUMERO"),
+                    numero_remision=numero_orden,
                     bodega_id=bodega_id,
+                    # Flujo "Orden de Salida -> Remisión Aprobada": la venta nace
+                    # sin precios; el PDF es una Orden de Salida SIN valores.
+                    estado=r.get("estado") or "ORDEN_SALIDA",
                 )
-                logger.info(f"📄 PDF generado: {pdf_path}")
-                salida = f"✅ Venta registrada: {len(r['registros'])} material(es)\n📄 Remisión generada\n📅 Fecha: {fecha}"
+                logger.info(f"📄 Orden de Salida generada: {pdf_path}")
+                salida = (
+                    f"✅ Orden de Salida #{numero_orden} registrada exitosamente: "
+                    f"{len(r['registros'])} material(es).\n"
+                    f"📅 Fecha: {fecha}\n"
+                    f"⏳ La Orden de Salida queda pendiente de valoración y aprobación "
+                    f"por el área de Contabilidad."
+                )
 
                 try:
                     await enviar_documento_whatsapp(
                         destino=telefono,
                         ruta_archivo=pdf_path,
-                        nombre_documento=f"Remision_{fecha}_{datos.get('cliente', 'Cliente')}.pdf"
+                        nombre_documento=f"Orden_de_Salida_{numero_orden}.pdf"
                     )
                 except Exception as e:
                     logger.error(f"❌ Error enviando PDF por WhatsApp: {e}")
-                    salida += "\n⚠️ PDF generado pero no se pudo enviar por WhatsApp"
+                    salida += "\n⚠️ Orden de Salida generada pero no se pudo enviar por WhatsApp"
 
             except Exception as e:
-                logger.error(f"❌ Error generando PDF: {e}")
-                salida = f"✅ Venta registrada: {len(r['registros'])} material(es), fecha {fecha}.\n⚠️ No se pudo generar remisión."
+                logger.error(f"❌ Error generando Orden de Salida: {e}")
+                salida = f"✅ Venta registrada: {len(r['registros'])} material(es), fecha {fecha}.\n⚠️ No se pudo generar la Orden de Salida."
         else:
             contexto["borrador_pendiente"] = datos
             await guardar_contexto(usuario_id, contexto)
