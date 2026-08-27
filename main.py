@@ -242,12 +242,15 @@ class EntradaRevuelto(BaseModel):
 
 
 class RespuestaAgente(BaseModel):
-    intencion: Literal["REGISTRO_DIARIO", "ENTRADA_REVUELTO", "SELECCION_REVUELTO", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO", "CONSULTA", "OTRO"] = "OTRO"
+    intencion: Literal["REGISTRO_DIARIO", "ENTRADA_REVUELTO", "SELECCION_REVUELTO", "TRANSFORMACION_MATERIAL", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO", "CONSULTA", "OTRO"] = "OTRO"
     fecha_operacion: Optional[str] = None
     entradas_revuelto: List[EntradaRevuelto] = Field(default_factory=list)
     items: List[ItemMaterial] = Field(default_factory=list)
     cantidad_revuelto_procesada: Optional[float] = None
     merma_kg: float = 0.0
+    material_origen: Optional[str] = None
+    material_merma: Optional[str] = None
+    nombre_proceso: Optional[str] = None
     fuente_compra: Optional[str] = None
     cliente: Optional[str] = None
     cliente_documento: Optional[str] = None
@@ -395,7 +398,7 @@ def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, 
     - Materiales BRUTO ('Basura', 'Tierra') o nombres no reconocidos → ``merma_kg``.
     - Solo 'basura' / 'tierra' deben permanecer en ``merma_kg``.
     """
-    if datos.get("intencion") not in ("SELECCION_REVUELTO", "REGISTRO_DIARIO"):
+    if datos.get("intencion") not in ("SELECCION_REVUELTO", "REGISTRO_DIARIO", "TRANSFORMACION_MATERIAL"):
         return datos
     if not inventario:
         return datos
@@ -637,14 +640,19 @@ Reglas de negocio:
 9. NUNCA asumas la fecha de una operación si el usuario no la mencionó explícitamente, ni siquiera como palabra relativa (hoy, ayer, jueves, etc.). Si el mensaje no menciona ninguna fecha, deja `fecha_operacion` en null y en `respuesta_texto` pregunta: "¿Qué fecha fue esta operación? (por ejemplo: hoy, ayer, o 13-08-2026)". Solo llena `fecha_operacion` cuando el usuario haya dicho una fecha (exacta o relativa) en algún momento de la conversación.
 10. Si el "Borrador de conversación previo" ya tiene una intención definida (distinta de OTRO) y el mensaje actual es corto y no describe una operación nueva (por ejemplo: solo un nombre, o datos de contacto como documento/dirección/celular/placa/conductor), es la respuesta a la pregunta pendiente. En ese caso usa la MISMA intención del borrador (no OTRO) y extrae lo que puedas del mensaje hacia los campos que faltaban.
 
+11. TRANSFORMACION_MATERIAL es para procesos que parten de un material que NO es Revuelto: quema/tratamiento de un semilimpio (ej. "Quemar 1000 kg de Cable → 600 kg de Cable Quemado + 400 kg de Basura") o selección técnica/desmonte de un semilimpio (ej. "Arreglar 1000 kg de Arreglo Carter → 500 kg Carter + 200 kg Chatarra + 50 kg Cable + 50 kg Arreglo Difícil + 250 kg Basura"). Poblá `material_origen` con el material semilimpio de entrada, cada producto en `items`, y la basura/tierra en `merma_kg`. La cantidad procesada debe ser 100% del origen (se descuenta del semilimpio). Si el origen ES 'Revuelto', usa SELECCION_REVUELTO (no esta intención).
+
 Esquema exacto:
 {{
-  "intencion":"REGISTRO_DIARIO|ENTRADA_REVUELTO|SELECCION_REVUELTO|COMPRA_DIRECTA|VENTA_DESPACHO|AJUSTE_INVENTARIO|CONSULTA|OTRO",
+  "intencion":"REGISTRO_DIARIO|ENTRADA_REVUELTO|SELECCION_REVUELTO|TRANSFORMACION_MATERIAL|COMPRA_DIRECTA|VENTA_DESPACHO|AJUSTE_INVENTARIO|CONSULTA|OTRO",
   "fecha_operacion":"YYYY-MM-DD|null",
   "entradas_revuelto":[{{"fuente_nombre":"string","cantidad_kg":0}}],
   "items":[{{"material_nombre":"string","cantidad_kg":0,"precio_unitario":0}}],
   "cantidad_revuelto_procesada":0,
   "merma_kg":0,
+  "material_origen":"string|null",
+  "material_merma":"string|null",
+  "nombre_proceso":"string|null",
   "fuente_compra":"string|null",
   "cliente":"string|null",
   "cliente_documento":"string|null",
@@ -732,6 +740,11 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
         return "Indica los materiales y kilos que se deben registrar.", "items"
     if intento == "SELECCION_REVUELTO" and not datos.get("items") and not datos.get("merma_kg", 0):
         return "Indica los materiales seleccionados o la cantidad de basura a descontar del Revuelto.", "items"
+    if intento == "TRANSFORMACION_MATERIAL":
+        if not datos.get("material_origen"):
+            return "Indica qué material se transforma (ejemplo: Cable, Arreglo Carter).", "material_origen"
+        if not datos.get("items") and not datos.get("merma_kg", 0):
+            return "Indica los materiales resultantes o la cantidad de merma de la transformación.", "items"
     
     # Máquina de estados estricta para VENTA_DESPACHO.
     # Cliente y conductor comparten el mismo wizard por pasos (módulos idénticos):
@@ -760,13 +773,53 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
 
     if intento == "COMPRA_DIRECTA" and not datos.get("fuente_compra"):
         datos["fuente_compra"] = "Compras"
-    if intento in ("REGISTRO_DIARIO", "ENTRADA_REVUELTO", "SELECCION_REVUELTO", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO") and not datos.get("fecha_operacion"):
+    if intento in ("REGISTRO_DIARIO", "ENTRADA_REVUELTO", "SELECCION_REVUELTO", "TRANSFORMACION_MATERIAL", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO") and not datos.get("fecha_operacion"):
         return "¿Qué fecha fue esta operación? Puedes responder 'hoy', 'ayer', un día de la semana, o una fecha exacta (dd-mm-aaaa).", "fecha_operacion"
     return None
 
 
 async def guardar_contexto(usuario_id: int, contexto: Dict[str, Any]) -> None:
     await asyncio.to_thread(lambda: supabase.table("usuarios").update({"contexto_operacion": contexto}).eq("id", usuario_id).execute())
+
+
+async def regenerar_y_enviar_pdf_remision(telefono: str, bodega_id: int, numero: str) -> str:
+    """Regenera el PDF de una remisión EXISTENTE conservando el mismo número
+    correlativo (no se genera uno nuevo) y lo envía por WhatsApp.
+
+    Devuelve un mensaje de confirmación o de error.
+    """
+    datos = await asyncio.to_thread(inventario.obtener_datos_pdf_remision, numero)
+    numero_remision = datos["numero_remision"]
+    try:
+        nombre_pdf = f"remision_{numero_remision}_{int(datetime.now(BOGOTA).timestamp())}.pdf"
+        pdf_path = os.path.join(tempfile.gettempdir(), nombre_pdf)
+        cliente = datos.get("cliente") or {}
+        conductor = datos.get("conductor") or {}
+        await asyncio.to_thread(
+            generar_remision_pdf_archivo,
+            pdf_path,
+            fecha=datos.get("fecha_operacion") or "",
+            cliente=cliente.get("nombre", "") or "",
+            documento=cliente.get("identificacion"),
+            direccion=cliente.get("direccion"),
+            celular=cliente.get("telefono"),
+            placa=conductor.get("placa"),
+            conductor=conductor.get("nombre"),
+            id_conductor=conductor.get("identificacion"),
+            celular_conductor=conductor.get("telefono"),
+            items=datos.get("items", []),
+            numero_remision=numero_remision,
+            bodega_id=bodega_id,
+        )
+        await enviar_documento_whatsapp(
+            destino=telefono,
+            ruta_archivo=pdf_path,
+            nombre_documento=f"Remision_Corregida_{numero_remision}.pdf",
+        )
+    except Exception as e:
+        logger.error(f"❌ Error regenerando PDF de {numero_remision}: {e}")
+        raise
+    return f"✅ Remisión {numero_remision} corregida. PDF regenerado con el mismo número y enviado por WhatsApp."
 
 
 async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str, Any]]) -> None:
@@ -813,13 +866,29 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     if accion.get("tipo"):
         respuesta_texto = None
         try:
-            if accion["tipo"] == "espera_numero_remision":
+            if accion["tipo"] == "espera_remision_modo":
+                eleccion = texto.strip().lower()
+                if eleccion in {"anular", "anular_rem", "anular rem", "anulacion", "anulación", "1"}:
+                    contexto["accion_pendiente"] = {"tipo": "espera_numero_remision", "modo": "anular"}
+                    respuesta_texto = "Anulación. ¿Qué remisión deseas anular? (ejemplo: REM_112)"
+                elif eleccion in {"corregir", "corregir_rem", "corregir rem", "correccion", "corrección", "2"}:
+                    contexto["accion_pendiente"] = {"tipo": "espera_numero_remision", "modo": "corregir"}
+                    respuesta_texto = "Corrección. ¿Qué remisión deseas corregir? (ejemplo: REM_112)"
+                else:
+                    respuesta_texto = "Responde 'anular' o 'corregir', o usa los botones."
+            elif accion["tipo"] == "espera_numero_remision":
                 remision = await asyncio.to_thread(inventario.obtener_remision, texto)
                 if not remision:
                     respuesta_texto = f"No encontré la remisión '{texto}'. Verifica el número."
                     contexto["accion_pendiente"] = {}
+                elif accion.get("modo") == "corregir":
+                    contexto["accion_pendiente"] = {"tipo": "corregir_opciones", "numero": remision["numero"], "modo": "corregir"}
+                    respuesta_texto = (
+                        f"Corrección de la remisión {remision['numero']}. ¿Qué deseas corregir?\n"
+                        "1. Material (cantidad)\n2. Cliente\n3. Finalizar y generar PDF"
+                    )
                 else:
-                    contexto["accion_pendiente"] = {"tipo": "espera_alcance", "numero": remision["numero"]}
+                    contexto["accion_pendiente"] = {"tipo": "espera_alcance", "numero": remision["numero"], "modo": "anular"}
                     respuesta_texto = f"¿Deseas anular TODA la remisión {remision['numero']}? (sí/no)"
             elif accion["tipo"] == "espera_alcance":
                 if texto.strip().lower() in {"si", "sí"}:
@@ -827,51 +896,102 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     respuesta_texto = f"Remisión {r['numero']} anulada por completo ({r['lineas_anuladas']} línea(s)). El stock fue devuelto."
                     contexto["accion_pendiente"] = {}
                 elif texto.strip().lower() == "no":
-                    contexto["accion_pendiente"] = {"tipo": "espera_material", "numero": accion["numero"]}
-                    respuesta_texto = "Digite los datos que desea modificar (ejemplo: Carter 3500)."
+                    contexto["accion_pendiente"] = {"tipo": "corregir_opciones", "numero": accion["numero"], "modo": "corregir"}
+                    respuesta_texto = (
+                        f"Corrección de la remisión {accion['numero']}. ¿Qué deseas corregir?\n"
+                        "1. Material (cantidad)\n2. Cliente\n3. Finalizar y generar PDF"
+                    )
                 else:
                     respuesta_texto = "Responde sí o no, por favor."
             elif accion["tipo"] == "espera_material":
-                par = parsear_material_cantidad(texto)
-                if not par:
-                    respuesta_texto = "No entendí. Escribe así: Material cantidad (ejemplo: Carter 3500)."
-                else:
-                    material_nombre, cantidad = par
+                if texto.strip().lower() in {"listo", "terminar", "finalizar", "fin", "generar pdf", "finalizar y generar pdf"}:
                     try:
-                        r = await asyncio.to_thread(
-                            inventario.anular_o_actualizar_linea, numero=accion["numero"],
-                            material_nombre=material_nombre, cantidad_kg=cantidad, usuario_id=usuario_id,
-                        )
-                    except ValueError as exc:
-                        respuesta_texto = str(exc)
-                        contexto["accion_pendiente"] = {}
+                        respuesta_texto = await regenerar_y_enviar_pdf_remision(telefono, bodega_id, accion["numero"])
+                    except Exception as exc:
+                        respuesta_texto = f"Correcciones guardadas, pero no se pudo regenerar el PDF: {exc}"
+                    contexto["accion_pendiente"] = {}
+                else:
+                    par = parsear_material_cantidad(texto)
+                    if not par:
+                        respuesta_texto = "No entendí. Escribe así: Material cantidad (ejemplo: Carter 3500). O escribe *finalizar* cuando termines."
                     else:
-                        if r["accion"] == "anulada":
-                            respuesta_texto = f"Se anuló {r['material']} ({r['cantidad']:,.2f} kg) de la remisión {accion['numero']}. Stock devuelto."
-                            contexto["accion_pendiente"] = {}
-                        else:
-                            contexto["accion_pendiente"] = {
-                                "tipo": "espera_confirmacion_actualizacion", "numero": accion["numero"],
-                                "movimiento_id": r["movimiento_id"], "material": r["material"],
-                                "cantidad_nueva": r["cantidad_nueva"],
-                            }
-                            respuesta_texto = (
-                                f"Ese dato no existe. En la remisión {accion['numero']}, {r['material']} está en "
-                                f"{r['cantidad_actual']:,.2f} kg. ¿Deseas actualizarlo a {r['cantidad_nueva']:,.2f} kg? (sí/no)"
+                        material_nombre, cantidad = par
+                        try:
+                            r = await asyncio.to_thread(
+                                inventario.anular_o_actualizar_linea, numero=accion["numero"],
+                                material_nombre=material_nombre, cantidad_kg=cantidad, usuario_id=usuario_id,
                             )
+                        except ValueError as exc:
+                            respuesta_texto = str(exc)
+                            contexto["accion_pendiente"] = {"tipo": "espera_material", "numero": accion["numero"], "modo": "corregir"}
+                        else:
+                            if r["accion"] == "anulada":
+                                respuesta_texto = (f"Se anuló {r['material']} ({r['cantidad']:,.2f} kg) de la remisión {accion['numero']}. "
+                                                   "Stock devuelto. Puedes seguir corrigiendo o escribe *finalizar*.")
+                                contexto["accion_pendiente"] = {"tipo": "corregir_opciones", "numero": accion["numero"], "modo": "corregir"}
+                            else:
+                                contexto["accion_pendiente"] = {
+                                    "tipo": "espera_confirmacion_actualizacion", "numero": accion["numero"],
+                                    "movimiento_id": r["movimiento_id"], "material": r["material"],
+                                    "cantidad_nueva": r["cantidad_nueva"],
+                                }
+                                respuesta_texto = (
+                                    f"Ese detalle no existe. En la remisión {accion['numero']}, {r['material']} está en "
+                                    f"{r['cantidad_actual']:,.2f} kg. ¿Deseas actualizarlo a {r['cantidad_nueva']:,.2f} kg? (sí/no)"
+                                )
             elif accion["tipo"] == "espera_confirmacion_actualizacion":
                 if texto.strip().lower() in {"si", "sí"}:
                     await asyncio.to_thread(
                         inventario.actualizar_cantidad_linea,
                         movimiento_id=accion["movimiento_id"], nueva_cantidad_kg=accion["cantidad_nueva"],
                     )
-                    respuesta_texto = f"{accion['material']} actualizado a {accion['cantidad_nueva']:,.2f} kg en la remisión {accion['numero']}."
-                    contexto["accion_pendiente"] = {}
+                    respuesta_texto = (f"{accion['material']} actualizado a {accion['cantidad_nueva']:,.2f} kg en la remisión {accion['numero']}. "
+                                       "Puedes seguir corrigiendo (Material/Cliente) o escribe *finalizar*.")
+                    contexto["accion_pendiente"] = {"tipo": "corregir_opciones", "numero": accion["numero"], "modo": "corregir"}
                 elif texto.strip().lower() == "no":
-                    contexto["accion_pendiente"] = {"tipo": "espera_material", "numero": accion["numero"]}
-                    respuesta_texto = "Digite los datos que desea modificar."
+                    contexto["accion_pendiente"] = {"tipo": "espera_material", "numero": accion["numero"], "modo": "corregir"}
+                    respuesta_texto = "Digite los datos que desea modificar, o escribe *finalizar*."
                 else:
                     respuesta_texto = "Responde sí o no, por favor."
+            elif accion["tipo"] == "corregir_opciones":
+                eleccion = texto.strip().lower()
+                numero = accion["numero"]
+                if eleccion in {"1", "material", "materiales"}:
+                    contexto["accion_pendiente"] = {"tipo": "espera_material", "numero": numero, "modo": "corregir"}
+                    respuesta_texto = f"Corrección de materiales de {numero}. Escribe: Material cantidad (ejemplo: Carter 3500). O *finalizar* para terminar."
+                elif eleccion in {"2", "cliente"}:
+                    rem = await asyncio.to_thread(inventario.obtener_remision, numero)
+                    if not rem or not rem.get("cliente_id"):
+                        respuesta_texto = f"La remisión {numero} no tiene un cliente asociado. Elige otra opción."
+                        contexto["accion_pendiente"] = {"tipo": "corregir_opciones", "numero": numero, "modo": "corregir"}
+                    else:
+                        contexto["accion_pendiente"] = {
+                            "tipo": "correccion_rem_cliente", "numero": numero,
+                            "cliente_id": rem["cliente_id"], "modo": "corregir",
+                        }
+                        respuesta_texto = "Escribe los datos del cliente a corregir (ejemplo: telefono 3001234567, direccion Calle 10 #5-20)."
+                elif eleccion in {"3", "finalizar", "listo", "terminar", "fin", "generar pdf"}:
+                    try:
+                        respuesta_texto = await regenerar_y_enviar_pdf_remision(telefono, bodega_id, numero)
+                    except Exception as exc:
+                        respuesta_texto = f"Correcciones guardadas, pero no se pudo regenerar el PDF: {exc}"
+                    contexto["accion_pendiente"] = {}
+                else:
+                    respuesta_texto = "Elige: 1. Material, 2. Cliente, 3. Finalizar."
+            elif accion["tipo"] == "correccion_rem_cliente":
+                campos = parsear_campos_cliente(texto)
+                if not campos:
+                    respuesta_texto = "No entendí los datos. Ejemplo: telefono 3001234567, direccion Calle 10 #5-20."
+                else:
+                    try:
+                        await asyncio.to_thread(inventario.actualizar_cliente, accion["cliente_id"], campos)
+                    except Exception as exc:
+                        respuesta_texto = str(exc)
+                        contexto["accion_pendiente"] = {"tipo": "correccion_rem_cliente", "numero": accion["numero"], "cliente_id": accion["cliente_id"], "modo": "corregir"}
+                    else:
+                        respuesta_texto = (f"Datos del cliente actualizados en la remisión {accion['numero']}. "
+                                           "Puedes seguir corrigiendo (Material/Cliente) o escribe *finalizar*.")
+                        contexto["accion_pendiente"] = {"tipo": "corregir_opciones", "numero": accion["numero"], "modo": "corregir"}
             elif accion["tipo"] == "correccion_cliente_nombre":
                 cliente = await asyncio.to_thread(inventario.obtener_cliente_por_nombre, texto)
                 if not cliente:
@@ -1015,10 +1135,14 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, respuesta_texto)
         return
     # Comandos directos por texto
-    if texto.lower() == "anular":
-        contexto["accion_pendiente"] = {"tipo": "espera_numero_remision"}
+    if texto.lower() in {"anular", "corregir", "anular/corregir rem", "anular rem", "corregir rem", "anular o corregir"}:
+        contexto["accion_pendiente"] = {"tipo": "espera_remision_modo"}
         await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, "¿Qué remisión deseas anular o corregir? (ejemplo: REM_112)")
+        await enviar_botones_whatsapp(
+            telefono,
+            "¿Deseas ANULAR o CORREGIR una remisión?",
+            [("anular_rem", "Anular Remisión"), ("corregir_rem", "Corregir Remisión")],
+        )
         return
     if texto.lower() == "corregir cliente":
         contexto["accion_pendiente"] = {"tipo": "correccion_cliente_nombre"}
@@ -1085,10 +1209,14 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         )
         return
 
-    elif texto in {"3", "Anular Inventario"}:
-        contexto["accion_pendiente"] = {"tipo": "espera_numero_remision"}
+    elif texto in {"3", "Anular Inventario"} or texto.lower() in {"anular", "corregir", "anular/corregir rem", "anular rem", "corregir rem", "anular o corregir", "anular/corregir"}:
+        contexto["accion_pendiente"] = {"tipo": "espera_remision_modo"}
         await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, "¿Qué remisión deseas anular o corregir? (ejemplo: REM_112)")
+        await enviar_botones_whatsapp(
+            telefono,
+            "¿Deseas ANULAR o CORREGIR una remisión?",
+            [("anular_rem", "Anular Remisión"), ("corregir_rem", "Corregir Remisión")],
+        )
         return
 
     
@@ -1190,6 +1318,20 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         elif intencion == "SELECCION_REVUELTO":
             r = await asyncio.to_thread(inventario.registrar_seleccion_revuelto, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
             salida = f"Selección registrada: {len(r['registros']) - 1} resultado(s), merma {r['merma_kg']:,.2f} kg, fecha {fecha}."
+        elif intencion == "TRANSFORMACION_MATERIAL":
+            origen = datos.get("material_origen") or "Revuelto"
+            r = await asyncio.to_thread(
+                inventario.registrar_transformacion_material,
+                bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha,
+                material_origen_nombre=origen,
+                resultados=datos.get("items", []),
+                merma_kg=datos.get("merma_kg", 0),
+                cantidad_procesada=datos.get("cantidad_revuelto_procesada"),
+                material_merma_nombre=datos.get("material_merma"),
+                nombre_proceso=datos.get("nombre_proceso") or "Transformación",
+            )
+            salida = (f"Transformación registrada desde {r['origen']}: {len(r['registros'])} movimiento(s), "
+                      f"merma {r['merma_kg']:,.2f} kg, fecha {fecha}.")
         elif intencion == "COMPRA_DIRECTA":
             r = await asyncio.to_thread(inventario.registrar_compra_directa, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, fuente_nombre=datos["fuente_compra"], items=datos["items"])
             salida = f"Compra registrada: {len(r['registros'])} material(es), fecha {fecha}."
@@ -1257,7 +1399,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             menu_principal = [
                 ("1", "Ingresar Inventario"),
                 ("2", "Ver Inventario"),
-                ("3", "Anular Inventario")
+                ("3", "Anular/Corregir Rem")
             ]
             
             await enviar_botones_whatsapp(

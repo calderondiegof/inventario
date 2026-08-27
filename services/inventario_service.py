@@ -12,8 +12,11 @@ from supabase import Client
 
 class TipoMaterial(str, Enum):
     BRUTO = "BRUTO"
-    LIMPIO = "LIMPIO"
     SEMILIMPIO = "SEMILIMPIO"
+    LIMPIO = "LIMPIO"
+    MERMA = "MERMA"
+    # Alias heredado de la versión anterior; al cargar el catálogo se
+    # normaliza a MERMA. Se mantiene por compatibilidad con la BD existente.
     DESPERDICIO = "DESPERDICIO"
 
 
@@ -123,6 +126,9 @@ class InventarioServiceConValidacion:
             # Compatibilidad con el valor usado por la versión anterior.
             if tipo == "PROCESABLE":
                 tipo = "SEMILIMPIO"
+            # El antiguo estado DESPERDICIO (Basura/Tierra) se normaliza a MERMA.
+            if tipo == "DESPERDICIO":
+                tipo = "MERMA"
             self.catalogo_materiales[normalizar(fila["nombre"])] = MaterialDTO(
                 id=fila["id"],
                 nombre=fila["nombre"],
@@ -542,6 +548,109 @@ class InventarioServiceConValidacion:
         }]
         return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma}
 
+    def registrar_transformacion_material(
+            self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,
+            material_origen_nombre: str, resultados: Iterable[Dict[str, Any]],
+            merma_kg: float = 0.0, cantidad_procesada: Optional[float] = None,
+            material_merma_nombre: Optional[str] = None,
+            nombre_proceso: str = "Transformación de material",
+    ) -> Dict[str, Any]:
+        """Transforma un material de origen en varios productos (limpios,
+        semilimpios y merma) descontando el 100% de lo ingresado, garantizando
+        la conservación de masa:  cantidad_procesada == Σ salidas + merma.
+
+        Reglas por estado del origen:
+        - Regla 1 (primaria/selección): origen BRUTO (sólo 'Revuelto') →
+          limpios/semilimpios/merma, todo descontado del Revuelto.
+        - Regla 2 (re-transformación, ej. quema de Cable): origen SEMILIMPIO →
+          semilimpios + merma. NO afecta al Revuelto/Bruto.
+        - Regla 3 (selección técnica/desmonte, ej. Arreglo Carter): origen
+          SEMILIMPIO → limpios + semilimpios + merma, descontando 100% origen.
+
+        La merma se trata como material MERMA del catálogo (p. ej. 'Basura' /
+        'Tierra') que acumula stock vendible; si no existe se guarda en
+        ``mermas_proceso`` (heredado) sin generar stock."""
+
+        fecha = self.validar_fecha(fecha_operacion)
+        origen = self._material_obligatorio(material_origen_nombre)
+        lote_id = str(uuid.uuid4())
+
+        if origen.tipo_material not in (TipoMaterial.BRUTO.value, TipoMaterial.SEMILIMPIO.value):
+            raise ValueError(
+                "Solo pueden transformarse materiales BRUTO (Revuelto) o SEMILIMPIO. "
+                f"'{origen.nombre}' está clasificado como {origen.tipo_material}."
+            )
+        if origen.tipo_material == TipoMaterial.BRUTO.value and normalizar(origen.nombre) != "revuelto":
+            raise ValueError("La transformación primaria solo puede partir de 'Revuelto' (BRUTO).")
+
+        merma = float(merma_kg or 0)
+        if merma < 0:
+            raise ValueError("La merma no puede ser negativa.")
+
+        resultados_validados = []
+        for item in resultados:
+            material, cantidad = self._material_obligatorio(item["material_nombre"]), self._cantidad(item["cantidad_kg"])
+            if material.id == origen.id:
+                raise ValueError(f"'{origen.nombre}' no puede generarse a sí mismo.")
+            if material.tipo_material == TipoMaterial.BRUTO.value:
+                raise ValueError("Un producto de transformación no puede ser BRUTO (Revuelto).")
+            resultados_validados.append((material, cantidad))
+
+        total_resultados = sum(c for _, c in resultados_validados)
+
+        # Conservación de masa
+        total_procesado = self._cantidad(cantidad_procesada) if cantidad_procesada else total_resultados + merma
+        if abs(total_procesado - total_resultados - merma) > 0.01:
+            raise ValueError(
+                f"Conservación de masa: procesado ({total_procesado:,.2f} kg) debe ser "
+                f"igual a resultados ({total_resultados:,.2f} kg) + merma ({merma:,.2f} kg)."
+            )
+
+        # Stock suficiente del origen
+        disponible = self.obtener_saldo(bodega_id, origen.id)
+        if disponible + 0.01 < total_procesado:
+            raise ValueError(
+                f"Stock insuficiente de '{origen.nombre}'. Disponible: {disponible:,.2f} kg; "
+                f"requerido: {total_procesado:,.2f} kg."
+            )
+
+        fuente_proceso = self._fuente_por_tipo("PROCESO_SELECCION")
+
+        movimientos = [self._movimiento(
+            usuario_id=usuario_id, bodega_id=bodega_id, material_id=origen.id,
+            tipo=TipoTransaccion.TRANSFORMACION, cantidad=-total_procesado, fecha=fecha,
+            lote_id=lote_id, observaciones=f"Salida de {origen.nombre} por {nombre_proceso}",
+        )]
+        movimientos.extend(self._movimiento(
+            usuario_id=usuario_id, bodega_id=bodega_id, material_id=material.id,
+            fuente_id=fuente_proceso.id, tipo=TipoTransaccion.TRANSFORMACION, cantidad=cantidad, fecha=fecha,
+            lote_id=lote_id, observaciones=f"Resultado de {nombre_proceso} de {origen.nombre}",
+        ) for material, cantidad in resultados_validados)
+
+        mermas: List[Dict[str, Any]] = []
+        if merma:
+            merma_mat = self.obtener_material_por_nombre(material_merma_nombre or "Basura")
+            if merma_mat and merma_mat.tipo_material == TipoMaterial.MERMA.value:
+                movimientos.append(self._movimiento(
+                    usuario_id=usuario_id, bodega_id=bodega_id, material_id=merma_mat.id,
+                    fuente_id=fuente_proceso.id, tipo=TipoTransaccion.TRANSFORMACION, cantidad=merma, fecha=fecha,
+                    lote_id=lote_id, observaciones=f"Merma (vendible) de {nombre_proceso} de {origen.nombre}",
+                ))
+            else:
+                mermas = [{
+                    "lote_operacion_id": lote_id, "bodega_id": bodega_id, "usuario_id": usuario_id,
+                    "material_origen_id": origen.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
+                    "fecha_operacion": fecha,
+                    "observaciones": f"Merma de {nombre_proceso}; sin material MERMA de catálogo para stock",
+                }]
+
+        registros = self._guardar_lote(movimientos, mermas)
+        return {
+            "lote_id": lote_id, "registros": registros, "merma_kg": merma,
+            "origen": origen.nombre, "tipo_origen": origen.tipo_material,
+            "materiales_salida": [mat.nombre for mat, _ in resultados_validados],
+        }
+
     def registrar_venta_multiple(self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,
                                  items: Iterable[Dict[str, Any]], cliente: Optional[str] = None,
                                  cliente_documento: Optional[str] = None, cliente_telefono: Optional[str] = None,
@@ -660,6 +769,46 @@ class InventarioServiceConValidacion:
         ).eq("lote_operacion_id", remision["lote_operacion_id"]).eq("anulado", False).execute().data or []
         remision["movimientos"] = movimientos
         return remision
+
+    def obtener_datos_pdf_remision(self, numero: str) -> Dict[str, Any]:
+        """Reúne todos los datos necesarios para regenerar el PDF de una remisión
+        EXISTENTE conservando exactamente el mismo número correlativo.
+
+        Devuelve la remisión tal cual está en la base (con las correcciones ya
+        aplicadas por anular_o_actualizar_linea / actualizar_cantidad_linea /
+        actualizar_cliente). El número usado es el original: NO se genera uno nuevo.
+        """
+        remision = self.obtener_remision(numero)
+        if not remision:
+            raise ValueError(f"No existe la remisión '{numero}'.")
+
+        cliente = {}
+        if remision.get("cliente_id"):
+            filas = self.supabase.table("clientes").select("*").eq("id", remision["cliente_id"]).execute().data
+            if filas:
+                cliente = filas[0]
+
+        conductor = {}
+        if remision.get("conductor_id"):
+            filas = self.supabase.table("conductores").select("*").eq("id", remision["conductor_id"]).execute().data
+            if filas:
+                conductor = filas[0]
+
+        # Los movimientos de una venta se guardan con cantidad_kg negativa; el
+        # PDF muestra valores positivos, igual que en la venta original.
+        items = []
+        for m in remision.get("movimientos", []):
+            nombre = (m.get("materiales") or {}).get("nombre", "Material")
+            items.append({"material_nombre": nombre, "cantidad_kg": abs(float(m["cantidad_kg"]))})
+
+        return {
+            "numero_remision": remision["numero"],
+            "fecha_operacion": remision.get("fecha_operacion"),
+            "bodega_id": remision.get("bodega_id"),
+            "cliente": cliente,
+            "conductor": conductor,
+            "items": items,
+        }
 
     def anular_remision_completa(self, numero: str, usuario_id: int) -> Dict[str, Any]:
         remision = self.obtener_remision(numero)
