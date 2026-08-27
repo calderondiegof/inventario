@@ -104,13 +104,16 @@ class _RpcBuilder:
                 self.fake._tables["mermas_proceso"].append(dict(mm))
             return _Resp(self.params.get("p_movimientos", []))
         if self.name == "aprobar_remision_con_precios":
-            # Replica la RPC PostgreSQL: fija vr_dolar_dia + estado='APROBADA'
-            # en la remision y guarda precio_unitario SOLO en los movimientos
-            # de su lote.
+            # Replica la RPC PostgreSQL (tipos UUID): p_remision_id llega como
+            # STRING (la RPC real lo castea a ::uuid) y las llaves del JSONB
+            # también son strings; la comparación de id es por texto.
             rid = self.params.get("p_remision_id")
             vd = self.params.get("p_vr_dolar_dia")
             precios = self.params.get("p_precios_items") or {}
-            rem = next((r for r in self.fake._tables["remisiones"] if r["id"] == rid), None)
+            if not isinstance(rid, str):
+                raise TypeError("p_remision_id debe enviarse como str (uuid)")
+            rem = next((r for r in self.fake._tables["remisiones"]
+                        if str(r["id"]) == rid), None)
             if rem is None:
                 raise ValueError(f"Remision {rid} no existe")
             lote = rem["lote_operacion_id"]

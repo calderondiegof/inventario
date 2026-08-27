@@ -81,8 +81,18 @@ CREATE INDEX IF NOT EXISTS idx_movimientos_lote_operacion
 
 -- ------------------------------------------------------------------
 -- 5) RPC: aprobar_remision_con_precios
---    Params: p_remision_id INT, p_vr_dolar_dia NUMERIC,
---            p_precio_items JSONB  →  {movimiento_id: precio_unitario, ...}
+--    Params: p_remision_id TEXT (UUID como texto, ej.
+--            '9f1c...-...'; se castea a ::uuid en el WHERE),
+--            p_vr_dolar_dia NUMERIC,
+--            p_precios_items JSONB  →  {movimiento_id: precio_unitario, ...}
+--    ⚠️ CORRECCIÓN error 42883 'operator does not exist: uuid = text':
+--    las PKs de remisiones.id y movimientos_inventario.id son UUID. La
+--    versión anterior recibía INTEGER y casteaba las llaves a ::INTEGER,
+--    lo que comparaba uuid = text/integer y fallaba. Ahora el parámetro
+--    llega como TEXTO (PostgREST/JSON no soporta tipo uuid nativo) y se
+--    castea explícitamente a ::uuid; las llaves del JSONB se castean a
+--    ::uuid. La comparación del lote se hace por texto (::text) para ser
+--    inmune al tipo real de lote_operacion_id.
 --    Lógica transaccional (atómica):
 --      (a) fija remisiones.vr_dolar_dia = p_vr_dolar_dia y estado = 'APROBADA';
 --      (b) actualiza en movimientos_inventario el precio_unitario SOLO de los
@@ -90,7 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_movimientos_lote_operacion
 --    Devuelve un resumen JSONB con el número de movimientos actualizados.
 -- ----------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.aprobar_remision_con_precios(
-    p_remision_id INTEGER,
+    p_remision_id TEXT,
     p_vr_dolar_dia NUMERIC,
     p_precios_items JSONB
 ) RETURNS JSONB
@@ -102,12 +112,12 @@ DECLARE
     v_numero  TEXT;
     v_lote    TEXT;
     v_precio  NUMERIC;
-    v_mov_id  INTEGER;
+    v_mov_id  UUID;
     v_updated INTEGER := 0;
 BEGIN
     -- Validación básica de parámetros.
-    IF p_remision_id IS NULL THEN
-        RAISE EXCEPTION 'El parámetro p_remision_id es obligatorio.';
+    IF p_remision_id IS NULL OR btrim(p_remision_id) = '' THEN
+        RAISE EXCEPTION 'El parámetro p_remision_id es obligatorio (UUID como texto).';
     END IF;
 
     IF p_precios_items IS NOT NULL AND jsonb_typeof(p_precios_items) <> 'object' THEN
@@ -115,10 +125,11 @@ BEGIN
     END IF;
 
     -- Bloquear la remisión y capturar su lote (FOR UPDATE evita carreras).
-    SELECT numero, lote_operacion_id
+    -- Cast explícito p_remision_id::uuid: evita 'uuid = text' (42883).
+    SELECT numero, lote_operacion_id::text
       INTO v_numero, v_lote
       FROM public.remisiones
-     WHERE id = p_remision_id
+     WHERE id = p_remision_id::uuid
      FOR UPDATE;
 
     IF NOT FOUND THEN
@@ -129,17 +140,18 @@ BEGIN
     UPDATE public.remisiones
        SET vr_dolar_dia = p_vr_dolar_dia,
            estado       = 'APROBADA'
-     WHERE id = p_remision_id;
+     WHERE id = p_remision_id::uuid;
 
     -- (b) Aplicar precios por movimiento, restringido al lote de la remisión.
+    -- Las llaves del JSONB son TEXTO: cast explícito a ::uuid (42883).
     FOR v_mov_id, v_precio IN
-        SELECT (key)::INTEGER, (value)::NUMERIC
+        SELECT (key)::UUID, (value)::NUMERIC
           FROM jsonb_each_text(COALESCE(p_precios_items, '{}'::jsonb))
     LOOP
         UPDATE public.movimientos_inventario
            SET precio_unitario = v_precio
          WHERE id = v_mov_id
-           AND lote_operacion_id = v_lote;
+           AND lote_operacion_id::text = v_lote;
 
         IF NOT FOUND THEN
             RAISE EXCEPTION

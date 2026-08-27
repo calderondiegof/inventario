@@ -805,18 +805,22 @@ class InventarioServiceConValidacion:
                  .execute().data or [])
         return filas
 
-    def aprobar_remision_con_precios(self, remision_id: int, vr_dolar_dia: float,
-                                     precios: Dict[int, float]) -> Dict[str, Any]:
+    def aprobar_remision_con_precios(self, remision_id: Any, vr_dolar_dia: float,
+                                     precios: Dict[Any, float]) -> Dict[str, Any]:
         """Ejecuta la RPC 'aprobar_remision_con_precios' (transacción atómica):
         fija remisiones.vr_dolar_dia, marca estado='APROBADA' y guarda el
         precio_unitario (por kilogramo) de cada movimiento del lote.
 
-        `precios`: {movimiento_id: precio_unitario} — se envía como JSONB
-        con claves de texto, tal como espera la función PostgreSQL.
+        ⚠️ Tipos UUID (PostgREST): las PKs son UUID en PostgreSQL y PostgREST
+        solo acepta representación JSON. `p_remision_id` se envía SIEMPRE como
+        string (la RPC lo castea a ::uuid) y las llaves de `p_precios_items`
+        como strings del id del movimiento (la RPC las castea a ::uuid).
+        Enviar enteros aquí provocaba 'operator does not exist: uuid = text'
+        (42883).
         """
         precios_items = {str(mov_id): float(p) for mov_id, p in precios.items()}
         respuesta = self.supabase.rpc("aprobar_remision_con_precios", {
-            "p_remision_id": int(remision_id),
+            "p_remision_id": str(remision_id),
             "p_vr_dolar_dia": float(vr_dolar_dia),
             "p_precios_items": precios_items,
         }).execute()
