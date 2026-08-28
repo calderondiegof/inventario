@@ -5,7 +5,7 @@ import difflib
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from supabase import Client
 
@@ -86,6 +86,40 @@ def aplicar_frases(texto_normalizado: str) -> str:
     return FRASES_MATERIAL.get(texto_normalizado, texto_normalizado)
 
 
+# Línea "Material Cantidad" (opcional viñeta y unidad 'kg'), usada por el
+# resolutor determinista de listas y la detección de reintentos.
+_LINEA_MATERIAL_CANTIDAD = re.compile(
+    r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE
+)
+
+
+def es_lista_materiales(texto: str) -> bool:
+    """True si el mensaje del usuario es (esencialmente) una lista de
+    selección de materiales: la mayoría de sus líneas son 'Material
+    Cantidad' (con o sin viñeta * - •)."""
+    lineas = [l.strip().lstrip("*-•").strip()
+              for l in re.split(r"[\n,;]+", texto or "") if l.strip()]
+    if not lineas:
+        return False
+    pares = [l for l in lineas if _LINEA_MATERIAL_CANTIDAD.match(l)]
+    return len(pares) >= max(1, len(lineas) - 1)
+
+
+def borrador_para_nueva_lista(borrador: Optional[Dict[str, Any]],
+                              texto: str) -> Dict[str, Any]:
+    """Prepara el borrador para fusionar la extracción de un NUEVO mensaje.
+
+    Si el mensaje es una lista de materiales (reintento del usuario), la lista
+    anterior del borrador se SOBRESCRIBE (items = []) para que la fusión no
+    CONCATENE los ítems del intento fallido con los del nuevo. El resto de
+    campos del borrador (intención, cliente, fecha…) se conserva. Si el
+    mensaje no es una lista, el borrador pasa intacto."""
+    borrador_limpio = dict(borrador or {})
+    if es_lista_materiales(texto):
+        borrador_limpio["items"] = []
+    return borrador_limpio
+
+
 @dataclass(frozen=True)
 class MaterialDTO:
     id: int
@@ -156,14 +190,113 @@ class InventarioServiceConValidacion:
         en ese orden, para obtener la clave de búsqueda en el catálogo."""
         return aplicar_sinonimos(aplicar_frases(normalizar(nombre)))
 
+    @staticmethod
+    def _frase_contenida(a: str, b: str) -> bool:
+        """True si una frase completa contiene a la otra (sin recortar a
+        palabras sueltas) y la parte corta es suficientemente larga (>=4
+        caracteres) para no producir falsos positivos."""
+        return (a in b or b in a) and min(len(a), len(b)) >= 4
+
     def obtener_material_por_nombre(self, nombre: str) -> Optional[MaterialDTO]:
+        """Resuelve un material con prioridad EXACT-FIRST / LONGEST-MATCH sobre
+        la FRASE COMPLETA recibida (jamás recortando a palabras individuales):
+
+        1. Coincidencia EXACTA del nombre completo normalizado (sin sinónimos).
+           'arreglo carter' → 'Arreglo Carter'; 'rechazo de aluminio' →
+           'Rechazo de Aluminio'; 'carter' → 'Cárter'.
+        2. Coincidencia exacta tras unificar frases y sinónimos de negocio
+           ('arreglo grueso' → 'arreglo carter' SOLO si el paso 1 falló).
+        3. Contención de la frase completa (longest match): el nombre recibido
+           íntegro está contenido en un nombre del catálogo o viceversa; gana
+           el nombre de catálogo MÁS LARGO y sin empates ('aluminio' →
+           'Rechazo de Aluminio').
+        4. Fuzzy (difflib) sobre el nombre completo; si hay varios candidatos
+           igual de parecidos devuelve None (ambiguo) para no adivinar.
+        """
+        base = normalizar(nombre)
+        if not base:
+            return None
+
+        # 1) Exacta sobre la cadena completa recibida.
+        if base in self.catalogo_materiales:
+            return self.catalogo_materiales[base]
+
+        # 2) Exacta tras frases/sinónimos.
         clave = self._clave_material(nombre)
         if clave in self.catalogo_materiales:
             return self.catalogo_materiales[clave]
-        candidatos = self._candidatos_aproximados(clave)
-        if len(candidatos) == 1:
-            return self.catalogo_materiales[candidatos[0]]
+
+        # 3) Contención de la frase completa (longest match, sin empates).
+        for candidato_txt in (base, clave):
+            contenedores = [
+                k for k in self.catalogo_materiales
+                if k and self._frase_contenida(candidato_txt, k)
+            ]
+            if contenedores:
+                mejor = max(contenedores, key=len)
+                if sum(1 for k in contenedores if len(k) == len(mejor)) == 1:
+                    return self.catalogo_materiales[mejor]
+
+        # 4) Fuzzy sobre el nombre completo (con detección de ambigüedad).
+        for candidato_txt in (clave, base):
+            candidatos = self._candidatos_aproximados(candidato_txt)
+            if len(candidatos) == 1:
+                return self.catalogo_materiales[candidatos[0]]
         return None
+
+    def resolver_lista_materiales(self, texto: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """Convierte el texto del usuario (lista con viñetas o líneas
+        'Material Cantidad') en items del catálogo garantizando:
+
+        - UNICIDAD 1:1: cada LÍNEA del texto se consume UNA sola vez y se
+          asigna a UN SOLO material del catálogo. Es imposible que un mismo
+          peso (ej. 501 kg) se replique en múltiples candidatos: no hay
+          expansión de coincidencias múltiples.
+        - CONSERVACIÓN DE FRASES COMPUESTAS: la resolución usa el nombre
+          completo de la línea (exact-first/longest-match, ver
+          obtener_material_por_nombre), sin recortar a 'Aluminio' cuando el
+          usuario escribió 'Rechazo de Aluminio'.
+        - Sin duplicados: líneas que resuelven al MISMO material se SUMAN en
+          un único item (misma convención que fusionar_borrador).
+
+        Devuelve (items, no_encontrados): items = [{'material_nombre',
+        'cantidad_kg', 'precio_unitario'}]; no_encontrados = nombres de línea
+        que no se pudieron resolver (para feedback al usuario).
+        """
+        lineas = [l.strip().lstrip("*-•").strip()
+                  for l in re.split(r"[\n,;]+", texto or "")]
+        items: List[Dict[str, Any]] = []
+        acumulados: Dict[str, float] = {}
+        claves_en_orden: List[str] = []
+        no_encontrados: List[str] = []
+        for linea in lineas:
+            if not linea:
+                continue
+            m = _LINEA_MATERIAL_CANTIDAD.match(linea)
+            if not m:
+                continue
+            nombre, cantidad = m.group(1).strip(), float(m.group(2).replace(",", "."))
+            # Unicidad: UNA resolución por línea; se consume y se avanza.
+            mat = self.obtener_material_por_nombre(nombre)
+            if mat is None:
+                no_encontrados.append(nombre)
+                continue
+            clave = normalizar(mat.nombre)
+            if clave in acumulados:
+                acumulados[clave] += cantidad
+                for it in items:
+                    if normalizar(it["material_nombre"]) == clave:
+                        it["cantidad_kg"] = acumulados[clave]
+                        break
+            else:
+                acumulados[clave] = cantidad
+                claves_en_orden.append(clave)
+                items.append({
+                    "material_nombre": mat.nombre,
+                    "cantidad_kg": cantidad,
+                    "precio_unitario": 0.0,
+                })
+        return items, no_encontrados
 
     def _material_obligatorio(self, nombre: str) -> MaterialDTO:
         material = self.obtener_material_por_nombre(nombre)
@@ -497,7 +630,8 @@ class InventarioServiceConValidacion:
             "material_origen_id": revuelto.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
             "fecha_operacion": fecha, "observaciones": "Merma de selección; no genera stock vendible",
         }]
-        return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma}
+        return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma,
+                "revuelto_descontado": total_procesado}
 
     def registrar_registro_diario(self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,
                                   entradas: Iterable[Dict[str, Any]], resultados: Iterable[Dict[str, Any]],
@@ -546,7 +680,8 @@ class InventarioServiceConValidacion:
             "material_origen_id": revuelto.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
             "fecha_operacion": fecha, "observaciones": "Merma de selección; no genera stock vendible",
         }]
-        return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma}
+        return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma,
+                "revuelto_descontado": total_procesado}
 
     def registrar_transformacion_material(
             self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,

@@ -23,6 +23,10 @@ sys.modules.setdefault("supabase", _stub)
 from services.inventario_service import (
     InventarioServiceConValidacion,
     TipoTransaccion,
+    MaterialDTO,
+    normalizar,
+    es_lista_materiales,
+    borrador_para_nueva_lista,
 )
 
 
@@ -416,6 +420,129 @@ def test_ordenes_salida_y_aprobacion():
         res.get("estado") == "APROBADA" and res.get("numero") == "REM_101")
 
 
+def test_mapeo_frases_compuestas_y_unicidad():
+    """Frases compuestas con prefijos repetidos: match exact-first/longest y
+    unicidad 1 línea -> 1 material (sin replicar el mismo peso)."""
+    inv = InventarioServiceConValidacion.__new__(InventarioServiceConValidacion)
+    inv.catalogo_materiales = {}
+    inv.catalogo_por_id = {}
+    for n in ["Cárter", "Arreglo Cárter", "Arreglo Grueso", "Rechazo de Aluminio", "Aluminio"]:
+        key = normalizar(n)
+        inv.catalogo_materiales[key] = MaterialDTO(
+            id=len(inv.catalogo_materiales) + 1, nombre=n,
+            tipo_material="COMERCIALIZABLE", es_comercializable=True)
+        inv.catalogo_por_id[inv.catalogo_materiales[key].id] = inv.catalogo_materiales[key]
+
+    # Simple vs compuesto: cada uno a su material exacto.
+    _ok("carter -> Cárter", inv.obtener_material_por_nombre("carter").nombre == "Cárter")
+    _ok("arreglo carter -> Arreglo Cárter (no Cárter)",
+        inv.obtener_material_por_nombre("arreglo carter").nombre == "Arreglo Cárter")
+    _ok("arreglo grueso -> Arreglo Grueso",
+        inv.obtener_material_por_nombre("arreglo grueso").nombre == "Arreglo Grueso")
+    _ok("rechazo de aluminio -> frase completa (no 'Aluminio')",
+        inv.obtener_material_por_nombre("rechazo de aluminio").nombre == "Rechazo de Aluminio")
+
+    # Lista mixta: 1 objeto por línea, pesos respectivos, sin duplicados.
+    items, no_encontrados = inv.resolver_lista_materiales(
+        "* arreglo carter 501\n* arreglo grueso 300\n* rechazo de aluminio 100")
+    _ok("lista: exactamente 3 items", len(items) == 3)
+    _ok("lista: nada no encontrado", no_encontrados == [])
+    esperado = {"Arreglo Cárter": 501.0, "Arreglo Grueso": 300.0, "Rechazo de Aluminio": 100.0}
+    _ok("lista: 1 objeto por línea con su peso",
+        {i["material_nombre"]: i["cantidad_kg"] for i in items} == esperado)
+    pesos = [i["cantidad_kg"] for i in items]
+    _ok("unicidad: ningún peso replicado en 2 materiales", len(pesos) == len(set(pesos)))
+
+    # Reintento tras error: el borrador se sobrescribe, no concatena.
+    borrador_previo = {"intencion": "VENTA_DESPACHO", "cliente": "ACME",
+                       "items": [{"material_nombre": "Cárter", "cantidad_kg": 501.0}]}
+    texto_reintento = "* carter 300\n* arreglo carter 501"
+    _ok("detecta lista de materiales", es_lista_materiales(texto_reintento))
+    borrador2 = borrador_para_nueva_lista(borrador_previo, texto_reintento)
+    _ok("reintento: items previos eliminados (sobrescritura)", borrador2["items"] == [])
+    _ok("reintento: conserva cliente/intención", borrador2["cliente"] == "ACME")
+    items2, ne2 = inv.resolver_lista_materiales(texto_reintento)
+    _ok("reintento: 2 items, carters diferenciados, sin 501 duplicado",
+        len(items2) == 2 and ne2 == []
+        and {i["material_nombre"]: i["cantidad_kg"] for i in items2}
+        == {"Cárter": 300.0, "Arreglo Cárter": 501.0})
+    # Mensaje que NO es lista: el borrador pasa intacto.
+    _ok("no-lista: borrador intacto",
+        borrador_para_nueva_lista(borrador_previo, "cliente ACME")["items"] == borrador_previo["items"])
+
+
+def test_purga_borrador_en_error():
+    """Validación fallida -> el borrador de materiales se purga y un reintento
+    con la lista corregida produce SOLO los ítems del último mensaje."""
+    inv = InventarioServiceConValidacion.__new__(InventarioServiceConValidacion)
+    inv.catalogo_materiales = {}
+    inv.catalogo_por_id = {}
+    for n in ["Cárter", "Arreglo Cárter"]:
+        key = normalizar(n)
+        inv.catalogo_materiales[key] = MaterialDTO(
+            id=len(inv.catalogo_materiales) + 1, nombre=n,
+            tipo_material="COMERCIALIZABLE", es_comercializable=True)
+        inv.catalogo_por_id[inv.catalogo_materiales[key].id] = inv.catalogo_materiales[key]
+
+    # Intento 1 (falla por material desconocido).
+    items1, ne1 = inv.resolver_lista_materiales("* arreglo carter 501\n* material_inexistente 100")
+    _ok("intento 1: material desconocido reportado", ne1 == ["material_inexistente"])
+    # Purga (como hace main.py en el except): solo se conservan los resueltos, PERO
+    # al ser error se vacía todo igual que el flujo real.
+    borrador = {"intencion": "VENTA_DESPACHO", "items": items1}
+    borrador["items"] = []  # <- purga tras error
+    # Intento 2: lista corregida completa.
+    items2, ne2 = inv.resolver_lista_materiales("* carter 300\n* arreglo carter 501")
+    borrador["items"] = items2
+    _ok("reintento tras error: solo 2 items del último mensaje",
+        len(borrador["items"]) == 2 and ne2 == [])
+    _ok("reintento tras error: no hay doble registro de Arreglo Cárter",
+        sum(1 for i in borrador["items"] if i["material_nombre"] == "Arreglo Cárter") == 1)
+
+
+def test_mensaje_seleccion_revuelto():
+    """El total de kilos restados al Revuelto (suma de la selección) se captura
+    en `revuelto_descontado` y el mensaje de confirmación incluye 'revuelto: -XX kg'."""
+    fake, inv = _generar()
+    _cargar(fake, B, "Revuelto", 1000)
+    r = inv.registrar_seleccion_revuelto(
+        bodega_id=B, usuario_id=9, fecha_operacion="2026-08-26",
+        resultados=[{"material_nombre": "Carter", "cantidad_kg": 40},
+                    {"material_nombre": "Cable", "cantidad_kg": 20}],
+        merma_kg=0,
+    )
+    _cons("servicio: revuelto_descontado = suma de la selección (60)",
+          abs(r["revuelto_descontado"] - 60.0) < 0.01)
+    _cons("servicio: merma 0", abs(r["merma_kg"]) < 0.01)
+    # Salida de Revuelto registrada en negativo por el total (TRANSFORMACION).
+    revuelto_id = inv.catalogo_materiales["revuelto"].id
+    salida = [m for m in fake._tables["movimientos_inventario"]
+              if m["material_id"] == revuelto_id
+              and (m.get("observaciones") or "").startswith("Salida de Revuelto")]
+    _cons("movimiento: salida de Revuelto -60 kg (TRANSFORMACION)",
+          len(salida) == 1 and abs(salida[0]["cantidad_kg"] + 60) < 0.01
+          and salida[0]["tipo_movimiento"] == TipoTransaccion.TRANSFORMACION.value)
+    # Mensaje con la MISMA plantilla que usa main.py.
+    num_resultados = len(r["registros"]) - 1
+    fecha = "2026-08-26"
+    msg = (f"Selección registrada: {num_resultados} resultado(s), "
+           f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:g} kg, "
+           f"fecha {fecha}.")
+    _cons("mensaje: formato exacto con 'revuelto: -60 kg'",
+          msg == "Selección registrada: 2 resultado(s), merma 0.00 kg, revuelto: -60 kg, fecha 2026-08-26.")
+    # Con merma y cantidad explícita de Revuelto procesada.
+    _cargar(fake, B, "Revuelto", 1000)
+    r2 = inv.registrar_seleccion_revuelto(
+        bodega_id=B, usuario_id=9, fecha_operacion="2026-08-26",
+        resultados=[{"material_nombre": "Carter", "cantidad_kg": 50.5}],
+        merma_kg=10, cantidad_revuelto_procesada=60.5,
+    )
+    _cons("servicio: cantidad explícita se captura intacta (60.5)",
+          abs(r2["revuelto_descontado"] - 60.5) < 0.01)
+    msg2 = f"revuelto: -{r2['revuelto_descontado']:g} kg"
+    _cons("mensaje: :g formatea sin ceros ni comas", msg2 == "revuelto: -60.5 kg")
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -425,6 +552,9 @@ def main():
     test_vender_merma()
     test_regenerar_pdf_datos()
     test_ordenes_salida_y_aprobacion()
+    test_mapeo_frases_compuestas_y_unicidad()
+    test_purga_borrador_en_error()
+    test_mensaje_seleccion_revuelto()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1

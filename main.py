@@ -21,7 +21,9 @@ from supabase import Client, create_client
 
 from reporte_grafico import generar_y_subir_grafico_stock
 from generador_pdf import generar_remision_pdf_archivo
-from services.inventario_service import InventarioServiceConValidacion, normalizar
+from services.inventario_service import (
+    InventarioServiceConValidacion, normalizar, borrador_para_nueva_lista,
+)
 from services.currency_service import obtener_tasa_dolar
 
 # Configuración de Logging
@@ -244,7 +246,7 @@ class EntradaRevuelto(BaseModel):
 
 
 class RespuestaAgente(BaseModel):
-    intencion: Literal["REGISTRO_DIARIO", "ENTRADA_REVUELTO", "SELECCION_REVUELTO", "TRANSFORMACION_MATERIAL", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO", "CONSULTA", "OTRO"] = "OTRO"
+    intencion: Literal["REGISTRO_DIARIO", "ENTRADA_REVUELTO", "SELECCION_REVUELTO", "TRANSFORMACION_MATERIAL", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO", "CONSULTA", "CONSULTA_INVENTARIO_TOTAL", "VER_MOVIMIENTOS_SELECCION", "REPORTE_POR_FECHA", "OTRO"] = "OTRO"
     fecha_operacion: Optional[str] = None
     entradas_revuelto: List[EntradaRevuelto] = Field(default_factory=list)
     items: List[ItemMaterial] = Field(default_factory=list)
@@ -319,13 +321,52 @@ SUB_MENU_INVENTARIO = [
 ]
 
 
-async def enviar_reporte_diario(telefono: str, bodega_id: int, message: Dict[str, Any], dias_atras: int = 0) -> None:
-    """Envía el reporte diario de la bodega. dias_atras=0 → 'hoy', 1 → 'ayer'."""
-    fecha = fecha_local_mensaje(message)
-    if dias_atras:
-        fecha = (datetime.fromisoformat(fecha).date() - timedelta(days=dias_atras)).isoformat()
+async def enviar_reporte_diario(telefono: str, bodega_id: int, message: Dict[str, Any],
+                                dias_atras: int = 0, fecha: Optional[str] = None) -> None:
+    """Envía el reporte diario de la bodega. dias_atras=0 → 'hoy', 1 → 'ayer'.
+    Si se pasa `fecha` (ISO) se usa esa fecha explícita (flujo Reporte por fecha)."""
+    if not fecha:
+        fecha = fecha_local_mensaje(message)
+        if dias_atras:
+            fecha = (datetime.fromisoformat(fecha).date() - timedelta(days=dias_atras)).isoformat()
     reporte = await asyncio.to_thread(inventario.obtener_reporte_diario_texto, bodega_id, fecha)
     await enviar_mensaje_whatsapp(telefono, reporte)
+
+
+async def enviar_grafico_inventario(telefono: str, bodega_id: int) -> None:
+    """Genera y envía la gráfica de stock de la bodega (reporte_grafico)."""
+    url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)
+    if url:
+        await enviar_imagen_whatsapp(telefono, url, f"Inventario de la bodega {bodega_id}")
+    else:
+        await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
+
+
+async def iniciar_inventario_total(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
+    """Submenú de 'Inventario Total': botones para elegir informe en texto o gráfico."""
+    contexto["borrador_pendiente"] = {}
+    contexto["campo_esperado"] = None
+    contexto["accion_pendiente"] = {}
+    await guardar_contexto(usuario_id, contexto)
+    await enviar_botones_whatsapp(
+        telefono, "¿Cómo deseas ver el Inventario Total?",
+        [("inv_txt", "Ver informe texto"), ("inv_graf", "Ver informe Grafico")],
+    )
+
+
+async def iniciar_reporte_por_fecha(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
+    """Flujo 'Reporte de Hoy' con fecha opcional: pide la fecha (DD/MM/AAAA)
+    y ofrece el botón rápido 'Hoy'."""
+    contexto["borrador_pendiente"] = {}
+    contexto["campo_esperado"] = None
+    contexto["accion_pendiente"] = {"tipo": "reporte_fecha"}
+    await guardar_contexto(usuario_id, contexto)
+    await enviar_botones_whatsapp(
+        telefono,
+        "Por favor, ingresa la fecha del reporte que deseas consultar "
+        "(formato DD/MM/AAAA) o presiona el botón para consultar hoy.",
+        [("inv_hoy_hoy", "📅 Hoy")],
+    )
 
 
 async def enviar_inventario_total(telefono: str, bodega_id: int) -> None:
@@ -343,12 +384,26 @@ async def enviar_inventario_total(telefono: str, bodega_id: int) -> None:
 
 
 async def pedir_movimientos_material(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
-    """Activa el flujo interactivo para consultar movimientos de un material."""
+    """Activa el flujo interactivo para consultar movimientos de un material.
+    Envía un List Message con TODOS los materiales del catálogo activo; la
+    selección (button/list reply llega como texto = nombre exacto) reengancha
+    con el estado `movimientos_material`, que resuelve por coincidencia
+    exacta. Fallback: si no hay catálogo, pregunta por texto."""
     contexto["accion_pendiente"] = {"tipo": "movimientos_material"}
     contexto["borrador_pendiente"] = {}
     contexto["campo_esperado"] = None
     await guardar_contexto(usuario_id, contexto)
-    await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
+    materiales = sorted(inventario.catalogo_materiales.values(), key=lambda m: m.nombre)
+    if materiales:
+        await enviar_lista_whatsapp(
+            telefono,
+            "Selecciona el material para ver sus movimientos:",
+            "Ver materiales",
+            [(m.nombre, m.nombre, m.tipo_material) for m in materiales],
+            titulo_lista="Materiales",
+        )
+    else:
+        await enviar_mensaje_whatsapp(telefono, "¿De qué material deseas ver los movimientos?")
 
 
 # Frases que activan el flujo de aprobación de Contabilidad (Orden de Salida
@@ -481,6 +536,10 @@ async def inferir_datos_ia(usuario: Dict[str, Any], bodega_id: int, fecha_mensaj
                            borrador: Dict[str, Any], texto: str) -> Optional[Dict[str, Any]]:
     """Pregunta al agente (DeepSeek) que interprete el mensaje y lo fusiona con el borrador.
     Devuelve None si la interpretación falló."""
+    # REINTENTOS: si el mensaje es una lista de selección de materiales, la
+    # lista anterior del borrador se SOBRESCRIBE (no se concatena), evitando
+    # registrar el doble de materiales cuando el usuario reintenta tras un error.
+    borrador = borrador_para_nueva_lista(borrador, texto)
     try:
         ai = await llamar_deepseek(
             prompt_agente(usuario=usuario["nombre"], bodega_id=bodega_id,
@@ -676,6 +735,34 @@ async def enviar_botones_whatsapp(destino: str, texto: str, opciones: List[tuple
     }
     await enviar_mensaje_whatsapp_json(payload)
 
+
+async def enviar_lista_whatsapp(destino: str, texto: str, titulo_boton: str,
+                                filas: List[tuple], titulo_lista: str = "Opciones") -> None:
+    """Envía un Interactive List Message (API oficial de Meta): el usuario
+    pulsa `titulo_boton` y ve un listado desplegable con hasta 10 filas.
+    Cada fila es (id, titulo, [descripcion]); al elegir una, el webhook
+    entrega su `id` en interactive.list_reply.id (ya se captura al inicio de
+    procesar_un_mensaje, por lo que reengancha con los flujos existentes)."""
+    rows = []
+    for fila in filas[:10]:
+        id_, titulo = fila[0], fila[1]
+        descripcion = fila[2] if len(fila) > 2 else None
+        row: Dict[str, Any] = {"id": str(id_)[:200], "title": str(titulo)[:24]}
+        if descripcion:
+            row["description"] = str(descripcion)[:72]
+        rows.append(row)
+    payload = _payload_base_whatsapp(destino, "interactive")
+    payload["interactive"] = {
+        "type": "list",
+        "body": {"text": texto},
+        "action": {
+            "button": titulo_boton[:20],
+            "sections": [{"title": titulo_lista[:24], "rows": rows}],
+        },
+    }
+    await enviar_mensaje_whatsapp_json(payload)
+
+
 async def enviar_imagen_whatsapp(destino: str, url_imagen: str, leyenda: str) -> None:
     payload = _payload_base_whatsapp(destino, "image")
     payload["image"] = {"link": url_imagen, "caption": leyenda}
@@ -771,9 +858,10 @@ Reglas de negocio:
 
 11. TRANSFORMACION_MATERIAL es para procesos que parten de un material que NO es Revuelto: quema/tratamiento de un semilimpio (ej. "Quemar 1000 kg de Cable → 600 kg de Cable Quemado + 400 kg de Basura") o selección técnica/desmonte de un semilimpio (ej. "Arreglar 1000 kg de Arreglo Carter → 500 kg Carter + 200 kg Chatarra + 50 kg Cable + 50 kg Arreglo Difícil + 250 kg Basura"). Poblá `material_origen` con el material semilimpio de entrada, cada producto en `items`, y la basura/tierra en `merma_kg`. La cantidad procesada debe ser 100% del origen (se descuenta del semilimpio). Si el origen ES 'Revuelto', usa SELECCION_REVUELTO (no esta intención).
 
+12. CONSULTAS DE INVENTARIO (no registran nada, solo informan): si el usuario pide ver el inventario total/completo de la bodega (ej. "inventario total", "ver todo el inventario"), usa CONSULTA_INVENTARIO_TOTAL. Si pide ver los movimientos o el historial de un material (ej. "movimientos de cobre", "historial de carter"), usa VER_MOVIMIENTOS_SELECCION y pon el material en `consulta_material` si lo menciono (null si no; el sistema mostrara la lista de materiales). Si pide el reporte de un dia (ej. "reporte de hoy", "reporte del 25-08-2026"), usa REPORTE_POR_FECHA: pon la fecha en `fecha_operacion` SOLO si el usuario la menciono (regla 9); si no la menciono dejala en null y el sistema pedira la fecha con opcion 'Hoy').
 Esquema exacto:
 {{
-  "intencion":"REGISTRO_DIARIO|ENTRADA_REVUELTO|SELECCION_REVUELTO|TRANSFORMACION_MATERIAL|COMPRA_DIRECTA|VENTA_DESPACHO|AJUSTE_INVENTARIO|CONSULTA|OTRO",
+  "intencion":"REGISTRO_DIARIO|ENTRADA_REVUELTO|SELECCION_REVUELTO|TRANSFORMACION_MATERIAL|COMPRA_DIRECTA|VENTA_DESPACHO|AJUSTE_INVENTARIO|CONSULTA|CONSULTA_INVENTARIO_TOTAL|VER_MOVIMIENTOS_SELECCION|REPORTE_POR_FECHA|OTRO",
   "fecha_operacion":"YYYY-MM-DD|null",
   "entradas_revuelto":[{{"fuente_nombre":"string","cantidad_kg":0}}],
   "items":[{{"material_nombre":"string","cantidad_kg":0,"precio_unitario":0}}],
@@ -1147,6 +1235,28 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     await asyncio.to_thread(inventario.actualizar_cliente, accion["cliente_id"], campos)
                     respuesta_texto = f"Datos de {accion['cliente_nombre']} actualizados."
                     contexto["accion_pendiente"] = {}
+            elif accion["tipo"] == "reporte_fecha":
+                # Flujo "Reporte por fecha": fecha escrita (DD/MM/AAAA,
+                # DD-MM-AAAA o DD-MM) o el botón rápido 📅 Hoy (llega como
+                # 'inv_hoy_hoy', ya ruteado antes, pero por si llega aquí).
+                if texto_normalizado == "inv_hoy_hoy":
+                    contexto["accion_pendiente"] = {}
+                    await guardar_contexto(usuario_id, contexto)
+                    await enviar_reporte_diario(telefono, bodega_id, message)
+                else:
+                    fecha_parseada = parsear_fecha_colombiana(texto)
+                    if not fecha_parseada:
+                        respuesta_texto = ("No entendí la fecha. Usa el formato DD/MM/AAAA "
+                                           "(ejemplo: 25/08/2026) o presiona el botón 'Hoy'.")
+                    else:
+                        if fecha_parseada > fecha_local_mensaje(message):
+                            respuesta_texto = "Esa fecha es futura. Indica una fecha válida."
+                        else:
+                            contexto["accion_pendiente"] = {}
+                            await guardar_contexto(usuario_id, contexto)
+                            await enviar_reporte_diario(telefono, bodega_id, message,
+                                                        fecha=fecha_parseada)
+                            return
             elif accion["tipo"] == "orden_salida_menu":
                 # Paso 2: el usuario (Contabilidad) selecciona una Orden de Salida
                 # (por botón interactivo —llega su id, que es el número— o tipeándolo).
@@ -1465,7 +1575,15 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
 
     # 2. Sub-botón: Inventario total
     if texto_normalizado == "inv_total":
+        await iniciar_inventario_total(telefono, usuario_id, contexto)
+        return
+
+    # 2b. Sub-botones del submenú "Inventario Total" (informe texto / gráfico).
+    if texto_normalizado == "inv_txt":
         await enviar_inventario_total(telefono, bodega_id)
+        return
+    if texto_normalizado == "inv_graf":
+        await enviar_grafico_inventario(telefono, bodega_id)
         return
 
     # 3. Sub-botón: Ver movimientos
@@ -1475,6 +1593,11 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
 
     # 4. Sub-botón: Reporte de hoy
     if texto_normalizado == "inv_hoy":
+        await iniciar_reporte_por_fecha(telefono, usuario_id, contexto)
+        return
+
+    # 4b. Botón rápido "📅 Hoy" del flujo Reporte por fecha.
+    if texto_normalizado == "inv_hoy_hoy":
         await enviar_reporte_diario(telefono, bodega_id, message)
         return
 
@@ -1551,6 +1674,11 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     else:
         datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
     if datos is None:
+        # IA no disponible: se purgan los materiales del borrador para que un
+        # reintento del usuario no acumule ítems del intento fallido.
+        if isinstance(contexto.get("borrador_pendiente"), dict):
+            contexto["borrador_pendiente"]["items"] = []
+            await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "No pude interpretar el mensaje. Inténtalo nuevamente.")
         return
 
@@ -1599,6 +1727,19 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             else:
                 saldos = inventario.obtener_saldos_bodega(bodega_id)
                 salida = "\n".join(["Inventario actual:"] + [f"- {x['material']}: {x['saldo_kg']} kg" for x in saldos])
+        elif intencion == "CONSULTA_INVENTARIO_TOTAL":
+            await iniciar_inventario_total(telefono, usuario_id, contexto)
+            return
+        elif intencion == "VER_MOVIMIENTOS_SELECCION":
+            await pedir_movimientos_material(telefono, usuario_id, contexto)
+            return
+        elif intencion == "REPORTE_POR_FECHA":
+            fecha_rep = datos.get("fecha_operacion")
+            if fecha_rep:
+                await enviar_reporte_diario(telefono, bodega_id, message, fecha=str(fecha_rep))
+            else:
+                await iniciar_reporte_por_fecha(telefono, usuario_id, contexto)
+            return
         elif intencion == "REGISTRO_DIARIO":
             r = await asyncio.to_thread(inventario.registrar_registro_diario, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, entradas=datos.get("entradas_revuelto", []), resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
             salida = f"Registro diario guardado: {len(r['registros'])} movimientos y merma de {r['merma_kg']:,.2f} kg, fecha {fecha}."
@@ -1607,7 +1748,9 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             salida = f"Entrada de Revuelto registrada: {len(r['registros'])} fuente(s), fecha {fecha}."
         elif intencion == "SELECCION_REVUELTO":
             r = await asyncio.to_thread(inventario.registrar_seleccion_revuelto, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
-            salida = f"Selección registrada: {len(r['registros']) - 1} resultado(s), merma {r['merma_kg']:,.2f} kg, fecha {fecha}."
+            salida = (f"Selección registrada: {len(r['registros']) - 1} resultado(s), "
+                      f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:g} kg, "
+                      f"fecha {fecha}.")
         elif intencion == "TRANSFORMACION_MATERIAL":
             origen = datos.get("material_origen") or "Revuelto"
             r = await asyncio.to_thread(
@@ -1713,6 +1856,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, salida)
     except Exception as exc:
+        # ERROR de validación/registro (ej. material no encontrado): se PURGAN
+        # los materiales del borrador inmediatamente; si el usuario reenvía la
+        # lista corregida, no se concatenan con los del intento fallido.
+        logger.error(f"❌ Error registrando la operación: {exc}")
+        if isinstance(contexto.get("borrador_pendiente"), dict):
+            contexto["borrador_pendiente"]["items"] = []
+            await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, f"No registré la operación: {exc}")
 
 
