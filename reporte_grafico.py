@@ -20,17 +20,19 @@ COLORES_TORTA = [
 ]
 COLOR_OTROS = "#b0b0b0"
 
-# Máximo de porciones individuales en la torta antes de agrupar el resto en "Otros".
-# Con inventarios de 20-25+ materiales, mostrar cada uno como porción propia vuelve
-# la torta ilegible (etiquetas encimadas, colores casi idénticos). La tabla sí
-# muestra todos los materiales sin recortar.
-MAX_PORCIONES_TORTA = 9
+# Máximo de porciones individuales en la torta (barras/rebanadas) ANTES de agrupar
+# el resto en "Otros". Requisito: el gráfico muestra a lo sumo 10 rebanadas —
+# las 9 categorías principales por peso + una décima "Otros" que consolida todo
+# lo que queda. Si hay 10 o menos materiales, se muestran todos sin agrupar.
+MAX_PORCIONES_TORTA = 10
 
 
 def _preparar_datos_torta(df_positivo: pd.DataFrame) -> pd.DataFrame:
+    # Si hay <=10 materiales se muestran todos, sin agrupar.
     if len(df_positivo) <= MAX_PORCIONES_TORTA:
         return df_positivo
 
+    # Top (MAX_PORCIONES_TORTA - 1 = 9) principales + "Otros" = 10 porciones.
     principales = df_positivo.iloc[:MAX_PORCIONES_TORTA - 1].copy()
     resto = df_positivo.iloc[MAX_PORCIONES_TORTA - 1:]
     fila_otros = pd.DataFrame([{

@@ -392,15 +392,15 @@ async def iniciar_reporte_por_fecha(telefono: str, usuario_id: int, contexto: Di
 
 
 async def enviar_inventario_total(telefono: str, bodega_id: int) -> None:
-    """Envía el resumen con todos los saldos de la bodega, ordenados de mayor a menor."""
+    """Envía el resumen con todos los saldos de la bodega, ordenados
+    alfabéticamente (obtener_saldos_bodega ya devuelve la lista ordenada)."""
     saldos = await asyncio.to_thread(inventario.obtener_saldos_bodega, bodega_id)
     if not saldos:
         await enviar_mensaje_whatsapp(telefono, f"No hay stock registrado en la Bodega #{bodega_id}.")
         return
-    saldos_ordenados = sorted(saldos, key=lambda x: x["saldo_kg"], reverse=True)
-    total_kg = sum(x["saldo_kg"] for x in saldos_ordenados)
+    total_kg = sum(x["saldo_kg"] for x in saldos)
     lineas = [f"📦 Inventario actual — Bodega #{bodega_id}", ""]
-    lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos_ordenados]
+    lineas += [f"• {x['material']}: {x['saldo_kg']:,.2f} kg" for x in saldos]
     lineas += ["", f"*Total inventario: {total_kg:,.2f} kg*"]
     await enviar_mensaje_whatsapp(telefono, "\n".join(lineas))
 

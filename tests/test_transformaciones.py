@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # se usa como anotacion de tipo, asi que un `object` es suficiente.
 _stub = types.ModuleType("supabase")
 _stub.Client = object
+_stub.create_client = lambda *a, **k: object()
 sys.modules.setdefault("supabase", _stub)
 
 from services.inventario_service import (
@@ -674,6 +675,75 @@ def test_lista_whatsapp_selecciona_formato():
           len(s10[0]["rows"]) == 10)
 
 
+def test_reporte_texto_alfabetico():
+    """Informe de inventario (texto): lista COMPLETA de materiales con stock,
+    ordenada ALFABÉTICAMENTE (obtener_saldos_bodega)."""
+    fake, inv = _generar()
+    # Materiales del catálogo de _generar con saldo positivo (con join materiales).
+    for i, nombre in enumerate(["Carter", "Cable", "Chatarra"]):
+        fake._tables["movimientos_inventario"].append({
+            "id": fake._next_id("movimientos_inventario"),
+            "bodega_id": B,
+            "material_id": _mid(fake, nombre),
+            "tipo_movimiento": TipoTransaccion.ENTRADA_BRUTA.value,
+            "cantidad_kg": 10.0 + i,
+            "lote_operacion_id": "seed",
+            "materiales": {"nombre": nombre},
+        })
+    saldos = inv.obtener_saldos_bodega(B)
+    nombres = [s["material"] for s in saldos]
+    _cons("informe texto: incluye TODOS los materiales con stock",
+          {"Carter", "Cable", "Chatarra"} <= set(nombres))
+    _cons("informe texto: orden alfabético",
+          nombres == sorted(nombres, key=normalizar))
+    _cons("informe texto: sin materiales sin stock", len(saldos) == 3)
+    _cons("informe texto: saldo redondeado a 2 decimales",
+          all(isinstance(s["saldo_kg"], float) for s in saldos))
+
+
+def test_grafico_otros_max_10():
+    """Gráfico de inventario: máx 10 rebanadas/barras — top 9 + 'Otros' que
+    consolida el resto; con 10 o menos materiales se muestran todos sin agrupar."""
+    import pandas as pd
+    from reporte_grafico import _preparar_datos_torta, MAX_PORCIONES_TORTA
+
+    _cons("grafico: maximo de porciones configurado en 10", MAX_PORCIONES_TORTA == 10)
+
+    # 11 materiales positivos -> top 9 + 'Otros' = 10 porciones.
+    df11 = pd.DataFrame({
+        "material": [f"Material{i}" for i in range(11)],
+        "kg": [float(100 - i) for i in range(11)],
+        "porcentaje": [1.0] * 11,
+    })
+    out11 = _preparar_datos_torta(df11)
+    _cons("grafico: 11 materiales -> 10 porciones (9 + Otros)", len(out11) == 10)
+    _cons("grafico: última porción es 'Otros'",
+          str(out11.iloc[-1]["material"]).startswith("Otros ("))
+    _cons("grafico: 'Otros' consolida la suma de los restantes",
+          abs(out11.iloc[-1]["kg"] - df11.iloc[9:]["kg"].sum()) < 0.01)
+    _cons("grafico: 9 principales + 1 Otros (sin 10 categorías individuales)",
+          not out11.iloc[:-1]["material"].str.startswith("Otros (").any())
+
+    # Exactamente 10 materiales -> se muestran todos, sin agrupar ni 'Otros'.
+    df10 = pd.DataFrame({
+        "material": [f"M{i}" for i in range(10)],
+        "kg": [1.0] * 10,
+        "porcentaje": [1.0] * 10,
+    })
+    out10 = _preparar_datos_torta(df10)
+    _cons("grafico: 10 materiales -> 10 porciones, sin agrupar",
+          len(out10) == 10 and not out10["material"].str.startswith("Otros (").any())
+
+    # Menos de 10 -> ídem (sin Otros).
+    df8 = pd.DataFrame({
+        "material": [f"N{i}" for i in range(8)],
+        "kg": [1.0] * 8, "porcentaje": [1.0] * 8,
+    })
+    out8 = _preparar_datos_torta(df8)
+    _cons("grafico: 8 materiales -> 8 porciones sin Otros",
+          len(out8) == 8 and not out8["material"].str.startswith("Otros (").any())
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -689,6 +759,8 @@ def main():
     test_caso_produccion_basura_merma_y_omitidos()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
+    test_reporte_texto_alfabetico()
+    test_grafico_otros_max_10()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1

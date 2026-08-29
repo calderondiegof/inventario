@@ -475,7 +475,12 @@ class InventarioServiceConValidacion:
         for fila in filas:
             nombre = fila.get("materiales", {}).get("nombre", "Desconocido")
             totales[nombre] = totales.get(nombre, 0.0) + float(fila["cantidad_kg"])
-        return [{"material": nombre, "saldo_kg": round(saldo, 2)} for nombre, saldo in totales.items() if saldo]
+        saldos = [{"material": nombre, "saldo_kg": round(saldo, 2)}
+                  for nombre, saldo in totales.items() if saldo]
+        # Requisito: el informe de inventario incluye la lista COMPLETA de
+        # materiales con stock ordenada ALFABÉTICAMENTE.
+        saldos.sort(key=lambda x: normalizar(x["material"]))
+        return saldos
 
     def obtener_movimientos_material(self, *, bodega_id: int, material_nombre: str,
                                      fecha_desde: Optional[str] = None,
