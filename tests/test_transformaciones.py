@@ -10,6 +10,11 @@ import os
 import sys
 import types
 
+# Consolas Windows (cp1252): los mensajes validados incluyen emojis (âš ï¸, âœ…)
+# que no se pueden imprimir en cp1252; sin esto la suite muere al imprimir.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # El directorio local `supabase/` (migraciones SQL) ENSOMBRECE al paquete pip
@@ -443,7 +448,7 @@ def test_mapeo_frases_compuestas_y_unicidad():
         inv.obtener_material_por_nombre("rechazo de aluminio").nombre == "Rechazo de Aluminio")
 
     # Lista mixta: 1 objeto por línea, pesos respectivos, sin duplicados.
-    items, no_encontrados = inv.resolver_lista_materiales(
+    items, no_encontrados, merma_l = inv.resolver_lista_materiales(
         "* arreglo carter 501\n* arreglo grueso 300\n* rechazo de aluminio 100")
     _ok("lista: exactamente 3 items", len(items) == 3)
     _ok("lista: nada no encontrado", no_encontrados == [])
@@ -461,7 +466,7 @@ def test_mapeo_frases_compuestas_y_unicidad():
     borrador2 = borrador_para_nueva_lista(borrador_previo, texto_reintento)
     _ok("reintento: items previos eliminados (sobrescritura)", borrador2["items"] == [])
     _ok("reintento: conserva cliente/intención", borrador2["cliente"] == "ACME")
-    items2, ne2 = inv.resolver_lista_materiales(texto_reintento)
+    items2, ne2, _m2 = inv.resolver_lista_materiales(texto_reintento)
     _ok("reintento: 2 items, carters diferenciados, sin 501 duplicado",
         len(items2) == 2 and ne2 == []
         and {i["material_nombre"]: i["cantidad_kg"] for i in items2}
@@ -485,14 +490,14 @@ def test_purga_borrador_en_error():
         inv.catalogo_por_id[inv.catalogo_materiales[key].id] = inv.catalogo_materiales[key]
 
     # Intento 1 (falla por material desconocido).
-    items1, ne1 = inv.resolver_lista_materiales("* arreglo carter 501\n* material_inexistente 100")
-    _ok("intento 1: material desconocido reportado", ne1 == ["material_inexistente"])
+    items1, ne1, _m1 = inv.resolver_lista_materiales("* arreglo carter 501\n* material_inexistente 100")
+    _ok("intento 1: material desconocido reportado", ne1 == ["material_inexistente 100"])
     # Purga (como hace main.py en el except): solo se conservan los resueltos, PERO
     # al ser error se vacía todo igual que el flujo real.
     borrador = {"intencion": "VENTA_DESPACHO", "items": items1}
     borrador["items"] = []  # <- purga tras error
     # Intento 2: lista corregida completa.
-    items2, ne2 = inv.resolver_lista_materiales("* carter 300\n* arreglo carter 501")
+    items2, ne2, _m3 = inv.resolver_lista_materiales("* carter 300\n* arreglo carter 501")
     borrador["items"] = items2
     _ok("reintento tras error: solo 2 items del último mensaje",
         len(borrador["items"]) == 2 and ne2 == [])
@@ -543,6 +548,77 @@ def test_mensaje_seleccion_revuelto():
     _cons("mensaje: :g formatea sin ceros ni comas", msg2 == "revuelto: -60.5 kg")
 
 
+def test_caso_produccion_basura_merma_y_omitidos():
+    """Caso real de producción: 12 líneas (7.809 kg). 'Basura 960' debe ir a
+    merma (NUNCA como ítem vendible) y 'Rechazo de cobre y bronce 69' debe
+    reportarse en la sección ⚠️ con nombre+cantidad, sin omitirse en silencio."""
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Grueso", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Lamina", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Radiador", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Olla", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Bobina", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Arreglo Grueso", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Perfil", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Cobre", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Bronce", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    _cargar(fake, B, "Revuelto", 20000)
+    texto = (
+        "Material seleccionado \n"
+        "* Grueso 3730\n* Lamina 468\n* Radiador 354\n* Olla 289\n"
+        "* Bobina 842\n* arreglo grueso 501\n* Cable 294\n* Perfil 234\n"
+        "* Cobre 21\n* Bronce 47\n* Rechazo de cobre y bronce 69\n* Basura 960"
+    )
+    items, no_encontrados, merma_lista = inv.resolver_lista_materiales(texto)
+    _cons("prod: 10 items vendibles (12 lineas - basura - omitido)", len(items) == 10)
+    _cons("prod: basura va a merma (960 kg), no a items",
+          abs(merma_lista - 960.0) < 0.01
+          and not any(i["material_nombre"] == "Basura" for i in items))
+    _cons("prod: omitido reportado con nombre y cantidad",
+          no_encontrados == ["Rechazo de cobre y bronce 69"])
+    _cons("prod: Grueso y Arreglo Grueso no se cruzan",
+          {i["material_nombre"]: i["cantidad_kg"] for i in items
+           if "rueso" in i["material_nombre"]}
+          == {"Grueso": 3730.0, "Arreglo Grueso": 501.0})
+    # Registro con la misma ruta que main.py (merma de la lista + sin otras).
+    r = inv.registrar_seleccion_revuelto(
+        bodega_id=B, usuario_id=9, fecha_operacion="2026-08-27",
+        resultados=items, merma_kg=merma_lista,
+    )
+    _cons("prod: merma registrada 960.00", abs(r["merma_kg"] - 960.0) < 0.01)
+    _cons("prod: revuelto descontado 7740 (items 6780 + merma 960)",
+          abs(r["revuelto_descontado"] - 7740.0) < 0.01)
+    # Plantilla ESTRICTA de main.py (construir_mensaje_seleccion):
+    msg = (f"✅ Selección registrada: {len(r['registros']) - 1} resultado(s), "
+           f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:.0f} kg, "
+           f"fecha 2026-08-27.")
+    if no_encontrados:
+        detalle = "\n".join(f"- {o} kg (Material no encontrado en el catálogo)"
+                            for o in no_encontrados)
+        msg += ("\n\n⚠️ **Atención:** Los siguientes ítems no se pudieron "
+                f"registrar y fueron ignorados:\n{detalle}")
+    esperado = (
+        "✅ Selección registrada: 10 resultado(s), merma 960.00 kg, "
+        "revuelto: -7740 kg, fecha 2026-08-27.\n\n"
+        "⚠️ **Atención:** Los siguientes ítems no se pudieron registrar y fueron ignorados:\n"
+        "- Rechazo de cobre y bronce 69 kg (Material no encontrado en el catálogo)")
+    _cons("prod: mensaje con sección ⚠️ exacta", msg == esperado)
+    # Sin omitidos: el mensaje NO incluye la sección de alerta.
+    _cargar(fake, B, "Revuelto", 1000)
+    r2 = inv.registrar_seleccion_revuelto(
+        bodega_id=B, usuario_id=9, fecha_operacion="2026-08-27",
+        resultados=[{"material_nombre": "Cable", "cantidad_kg": 100}], merma_kg=0,
+    )
+    msg2 = (f"✅ Selección registrada: {len(r2['registros']) - 1} resultado(s), "
+            f"merma {r2['merma_kg']:.2f} kg, revuelto: -{r2['revuelto_descontado']:.0f} kg, "
+            f"fecha 2026-08-27.")
+    _cons("prod: sin omitidos no hay sección ⚠️", "Atención" not in msg2
+          and msg2.startswith("✅ Selección registrada: 1 resultado(s)"))
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -555,6 +631,7 @@ def main():
     test_mapeo_frases_compuestas_y_unicidad()
     test_purga_borrador_en_error()
     test_mensaje_seleccion_revuelto()
+    test_caso_produccion_basura_merma_y_omitidos()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1
