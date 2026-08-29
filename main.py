@@ -24,6 +24,7 @@ from reporte_grafico import generar_y_subir_grafico_stock
 from generador_pdf import generar_remision_pdf_archivo
 from services.inventario_service import (
     InventarioServiceConValidacion, normalizar, borrador_para_nueva_lista,
+    es_lista_materiales,
 )
 from services.currency_service import obtener_tasa_dolar
 
