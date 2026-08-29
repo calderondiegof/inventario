@@ -1019,6 +1019,65 @@ async def guardar_contexto(usuario_id: int, contexto: Dict[str, Any]) -> None:
     await asyncio.to_thread(lambda: supabase.table("usuarios").update({"contexto_operacion": contexto}).eq("id", usuario_id).execute())
 
 
+async def construir_mensaje_seleccion(r: Dict[str, Any], fecha: str,
+                                omitidos: Optional[List[str]] = None) -> str:
+    """Plantilla ESTRICTA de la confirmación de selección por WhatsApp.
+
+    Formato base:
+      ✅ Selección registrada: {n} resultado(s), merma {merma:.2f} kg,
+      revuelto: -{total:.0f} kg, fecha {fecha}.
+
+    Si hay ítems que no pudieron registrarse (no encontrados en catálogo),
+    se añade la sección de alerta — los ítems omitidos JAMÁS se ignoran en
+    silencio."""
+    msg = (f"✅ Selección registrada: {len(r['registros']) - 1} resultado(s), "
+           f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:.0f} kg, "
+           f"fecha {fecha}.")
+    if omitidos:
+        detalle = "\n".join(f"- {o} kg (Material no encontrado en el catálogo)"
+                            for o in omitidos)
+        msg += ("\n\n⚠️ **Atención:** Los siguientes ítems no se pudieron "
+                f"registrar y fueron ignorados:\n{detalle}")
+    return msg
+
+
+def consolidar_seleccion(datos: Dict[str, Any], texto: str) -> None:
+    """Post-procesado del borrador de SELECCION_REVUELTO (muta `datos`):
+
+    1. Si el mensaje del usuario es una LISTA de materiales (viñetas o líneas
+       'Material Cantidad'), se resuelve de forma DETERMINISTA con
+       resolver_lista_materiales: cada línea se consume una vez y los ítems no
+       encontrados se reportan en datos['materiales_omitidos'] (nada se
+       omite en silencio, evitando que la IA simplifique/recorte frases).
+    2. Clasificación de merma: cualquier item cuyo material sea de tipo MERMA
+       (ej. 'Basura') se mueve a merma_kg — la basura nunca se registra como
+       material comercializable.
+
+    Debe llamarse con contexto de catálogo cargado (inventario.catalogo_materiales).
+    """
+    if datos.get("intencion") != "SELECCION_REVUELTO":
+        return
+    omitidos: List[str] = []
+    if es_lista_materiales(texto):
+        items, no_encontrados, merma_lista = inventario.resolver_lista_materiales(texto)
+        datos["items"] = items
+        datos["merma_kg"] = float(datos.get("merma_kg") or 0) + merma_lista
+        omitidos = list(no_encontrados)
+    else:
+        # Ruta IA: separar items de tipo MERMA hacia merma_kg.
+        items = datos.get("items") or []
+        vendibles: List[Dict[str, Any]] = []
+        for it in items:
+            mat = inventario.obtener_material_por_nombre(it.get("material_nombre") or "")
+            if mat and (mat.tipo_material or "").upper() == "MERMA":
+                datos["merma_kg"] = float(datos.get("merma_kg") or 0) + float(it.get("cantidad_kg") or 0)
+            else:
+                vendibles.append(it)
+        datos["items"] = vendibles
+    datos["materiales_omitidos"] = omitidos
+
+
+
 async def regenerar_y_enviar_pdf_remision(telefono: str, bodega_id: int, numero: str) -> str:
     """Regenera el PDF de una remisión EXISTENTE conservando el mismo número
     correlativo (no se genera uno nuevo) y lo envía por WhatsApp.
@@ -1702,6 +1761,10 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_mensaje_whatsapp(telefono, "No pude interpretar el mensaje. Inténtalo nuevamente.")
         return
 
+    # Consolidación de la selección: resolución determinista de listas (nada
+    # se omite en silencio) y clasificación de merma (Basura → merma_kg).
+    consolidar_seleccion(datos, texto)
+
     cliente_existente = None
     conductor_existente = None
     if datos.get("intencion") == "VENTA_DESPACHO" and datos.get("cliente"):
@@ -1778,9 +1841,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             salida = ("⚠️ Selección duplicada: ya se registró hace instantes "
                       f"(revuelto: -{r['revuelto_descontado']:g} kg, fecha {fecha}); no se volvió a registrar."
                       if r.get("duplicado") else
-                      (f"Selección registrada: {len(r['registros']) - 1} resultado(s), "
-                       f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:g} kg, "
-                       f"fecha {fecha}."))
+                      construir_mensaje_seleccion(r, fecha, datos.get("materiales_omitidos")))
         elif intencion == "TRANSFORMACION_MATERIAL":
             origen = datos.get("material_origen") or "Revuelto"
             r = await asyncio.to_thread(

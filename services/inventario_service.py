@@ -274,10 +274,23 @@ class InventarioServiceConValidacion:
 
         # 3) Contención de la frase completa (longest match, sin empates).
         for candidato_txt in (base, clave):
-            contenedores = [
-                k for k in self.catalogo_materiales
-                if k and self._frase_contenida(candidato_txt, k)
-            ]
+            contenedores = []
+            for k in self.catalogo_materiales:
+                if not k or not self._frase_contenida(candidato_txt, k):
+                    continue
+                if candidato_txt in k:
+                    # El usuario escribió una abreviatura de un nombre más
+                    # largo del catálogo (ej. 'aluminio' ⊂ 'Rechazo de
+                    # Aluminio'): siempre válido.
+                    contenedores.append(k)
+                else:
+                    # k ⊂ candidato: el nombre del catálogo es MÁS CORTO que
+                    # la frase del usuario (ej. 'bronce' ⊂ 'Rechazo de cobre
+                    # y bronce'). Solo se acepta si longitudes comparables;
+                    # si la frase es mucho más larga es una frase compuesta
+                    # distinta y NO debe colapsar al material corto.
+                    if len(k) >= 0.5 * len(candidato_txt):
+                        contenedores.append(k)
             if contenedores:
                 mejor = max(contenedores, key=len)
                 if sum(1 for k in contenedores if len(k) == len(mejor)) == 1:
@@ -305,16 +318,20 @@ class InventarioServiceConValidacion:
         - Sin duplicados: líneas que resuelven al MISMO material se SUMAN en
           un único item (misma convención que fusionar_borrador).
 
-        Devuelve (items, no_encontrados): items = [{'material_nombre',
-        'cantidad_kg', 'precio_unitario'}]; no_encontrados = nombres de línea
-        que no se pudieron resolver (para feedback al usuario).
+        Devuelve (items, no_encontrados, merma_kg):
+        - items = [{'material_nombre', 'cantidad_kg', 'precio_unitario'}]
+          SOLO materiales comercializables (excluye tipo MERMA).
+        - no_encontrados = nombres de línea que no se pudieron resolver
+          (para feedback al usuario; NUNCA se omiten en silencio).
+        - merma_kg = suma de líneas cuyo material es de tipo MERMA
+          (ej. 'Basura'): van al descuento de merma, no a los ítems.
         """
         lineas = [l.strip().lstrip("*-•").strip()
                   for l in re.split(r"[\n,;]+", texto or "")]
         items: List[Dict[str, Any]] = []
         acumulados: Dict[str, float] = {}
-        claves_en_orden: List[str] = []
         no_encontrados: List[str] = []
+        merma_kg = 0.0
         for linea in lineas:
             if not linea:
                 continue
@@ -325,7 +342,14 @@ class InventarioServiceConValidacion:
             # Unicidad: UNA resolución por línea; se consume y se avanza.
             mat = self.obtener_material_por_nombre(nombre)
             if mat is None:
-                no_encontrados.append(nombre)
+                # Se reporta nombre + cantidad para que el mensaje de alerta
+                # muestre la línea completa (ej. 'Rechazo de cobre y bronce 69').
+                no_encontrados.append(f"{nombre} {cantidad:g}")
+                continue
+            # Clasificación de merma: los materiales de tipo MERMA (ej.
+            # 'Basura') se acumulan en merma_kg, jamás como ítem vendible.
+            if (mat.tipo_material or "").upper() == "MERMA":
+                merma_kg += cantidad
                 continue
             clave = normalizar(mat.nombre)
             if clave in acumulados:
@@ -336,13 +360,12 @@ class InventarioServiceConValidacion:
                         break
             else:
                 acumulados[clave] = cantidad
-                claves_en_orden.append(clave)
                 items.append({
                     "material_nombre": mat.nombre,
                     "cantidad_kg": cantidad,
                     "precio_unitario": 0.0,
                 })
-        return items, no_encontrados
+        return items, no_encontrados, merma_kg
 
     def _material_obligatorio(self, nombre: str) -> MaterialDTO:
         material = self.obtener_material_por_nombre(nombre)
