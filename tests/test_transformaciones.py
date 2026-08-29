@@ -29,7 +29,7 @@ from services.inventario_service import (
     InventarioServiceConValidacion,
     TipoTransaccion,
     MaterialDTO,
-    normalizar,
+    normalizar, agrupar_en_secciones_para_lista,
     es_lista_materiales,
     borrador_para_nueva_lista,
 )
@@ -619,6 +619,47 @@ def test_caso_produccion_basura_merma_y_omitidos():
           and msg2.startswith("✅ Selección registrada: 1 resultado(s)"))
 
 
+def test_catalogo_completo_mas_de_30():
+    """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
+    (no está limitada a 10): con 35 registros se cargan los 35, ordenados
+    alfabéticamente por nombre."""
+    fake = FakeSupabase()
+    nombres = [f"Material {i:02d}" for i in range(1, 36)]  # 35 materiales
+    fake._seed("materiales", [
+        {"nombre": n, "tipo_material": "LIMPIO", "es_comercializable": True}
+        for n in nombres
+    ])
+    inv = InventarioServiceConValidacion(fake)
+    _cons("catalogo: carga más de 30 registros", len(inv.catalogo_materiales) >= 30)
+    _cons("catalogo: los 35 materiales presentes", len(inv.catalogo_materiales) == 35)
+    normalizados = {normalizar(n) for n in nombres}
+    _cons("catalogo: sin pérdida de elementos (>=30 sin truncar)",
+          normalizados <= set(inv.catalogo_materiales))
+    # Recargar es idempotente y no duplica ni trunca.
+    inv.recargar_catalogos()
+    _cons("catalogo: recarga conserva los 35", len(inv.catalogo_materiales) == 35)
+
+
+def test_agrupar_secciones_lista_completa():
+    """El agrupado del List Message de WhatsApp NO trunca a 10: 35 filas se
+    reparten en secciones de a lo sumo 10 (límite de la API de Meta) y se
+    conservan todas (10/sección × ½ secciones)."""
+    filas = [(i, f"Material {i}", "LIMPIO") for i in range(35)]
+    secciones = agrupar_en_secciones_para_lista(filas, titulo_lista="Materiales")
+    total = sum(len(s["rows"]) for s in secciones)
+    _cons("secciones: total de filas sin truncar (35)", total == 35)
+    _cons("secciones: máximo 10 filas por sección",
+          all(len(s["rows"]) <= 10 for s in secciones))
+    _cons("secciones: 4 secciones para 35 filas", len(secciones) == 4)
+    _cons("secciones: fila formateada {id,title,description}",
+          secciones[0]["rows"][0] ==
+          {"id": "0", "title": "Material 0", "description": "LIMPIO"})
+    # Con <10 filas se conserva una sola sección (retrocompatibilidad).
+    secciones2 = agrupar_en_secciones_para_lista([(1, "X")], titulo_lista="L")
+    _cons("secciones: <10 filas -> 1 sección",
+          len(secciones2) == 1 and len(secciones2[0]["rows"]) == 1)
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -632,6 +673,8 @@ def main():
     test_purga_borrador_en_error()
     test_mensaje_seleccion_revuelto()
     test_caso_produccion_basura_merma_y_omitidos()
+    test_catalogo_completo_mas_de_30()
+    test_agrupar_secciones_lista_completa()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1

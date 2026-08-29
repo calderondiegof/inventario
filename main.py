@@ -23,8 +23,8 @@ from supabase import Client, create_client
 from reporte_grafico import generar_y_subir_grafico_stock
 from generador_pdf import generar_remision_pdf_archivo
 from services.inventario_service import (
-    InventarioServiceConValidacion, normalizar, borrador_para_nueva_lista,
-    es_lista_materiales,
+    InventarioServiceConValidacion, normalizar, agrupar_en_secciones_para_lista,
+    borrador_para_nueva_lista, es_lista_materiales,
 )
 from services.currency_service import obtener_tasa_dolar
 
@@ -759,26 +759,24 @@ async def enviar_botones_whatsapp(destino: str, texto: str, opciones: List[tuple
 
 async def enviar_lista_whatsapp(destino: str, texto: str, titulo_boton: str,
                                 filas: List[tuple], titulo_lista: str = "Opciones") -> None:
-    """Envía un Interactive List Message (API oficial de Meta): el usuario
-    pulsa `titulo_boton` y ve un listado desplegable con hasta 10 filas.
-    Cada fila es (id, titulo, [descripcion]); al elegir una, el webhook
-    entrega su `id` en interactive.list_reply.id (ya se captura al inicio de
-    procesar_un_mensaje, por lo que reengancha con los flujos existentes)."""
-    rows = []
-    for fila in filas[:10]:
-        id_, titulo = fila[0], fila[1]
-        descripcion = fila[2] if len(fila) > 2 else None
-        row: Dict[str, Any] = {"id": str(id_)[:200], "title": str(titulo)[:24]}
-        if descripcion:
-            row["description"] = str(descripcion)[:72]
-        rows.append(row)
+    """Envía un Interactive List Message (API oficial de Meta): el usuario pulsa
+    `titulo_boton` y ve un listado desplegable con el catálogo COMPLETO.
+    Cada fila es (id, titulo, [descripcion]); al elegir una, el webhook entrega
+    su `id` en interactive.list_reply.id (ya se captura al inicio de
+    procesar_un_mensaje, por lo que reengancha con los flujos existentes).
+
+    Se agrupa el total de filas en secciones de a lo sumo 10 (agrupar_en_secciones
+    _para_lista) para respetar el límite de la API de Meta (10 filas/sección × 10
+    secciones) y listar así todos los materiales (>10) en un único mensaje, sin
+    truncar la consulta del catálogo."""
+    sections = agrupar_en_secciones_para_lista(filas, titulo_lista=titulo_lista)
     payload = _payload_base_whatsapp(destino, "interactive")
     payload["interactive"] = {
         "type": "list",
         "body": {"text": texto},
         "action": {
             "button": titulo_boton[:20],
-            "sections": [{"title": titulo_lista[:24], "rows": rows}],
+            "sections": sections,
         },
     }
     await enviar_mensaje_whatsapp_json(payload)

@@ -38,6 +38,33 @@ def normalizar(texto: str) -> str:
     return re.sub(r"\s+", " ", texto)
 
 
+def agrupar_en_secciones_para_lista(filas: Iterable, titulo_lista: str = "Materiales",
+                                    max_filas: int = 10) -> List[Dict[str, Any]]:
+    """Agrupa filas de un Interactive List Message de WhatsApp en secciones de
+    a lo sumo `max_filas` filas, y devuelve TODAS las secciones sin truncar
+    ninguna fila.
+
+    La API de Meta permite hasta 10 filas por sección y hasta 10 secciones por
+    mensaje (máx ~100 filas). Con esto se puede listar el catálogo COMPLETO
+    (30+ materiales) en un único List Message, en vez de limitarse a 10.
+
+    Cada fila de entrada es (id, titulo, [descripcion]) y se normaliza a
+    {id, title, description} (con los límites de longitud de la API).
+    """
+    filas = list(filas)
+    secciones: List[Dict[str, Any]] = []
+    for i in range(0, len(filas), max_filas):
+        rows = []
+        for fila in filas[i:i + max_filas]:
+            id_, titulo = fila[0], fila[1]
+            row: Dict[str, Any] = {"id": str(id_)[:200], "title": str(titulo)[:24]}
+            if len(fila) > 2 and fila[2]:
+                row["description"] = str(fila[2])[:72]
+            rows.append(row)
+        secciones.append({"title": str(titulo_lista)[:24], "rows": rows})
+    return secciones
+
+
 # Palabras que el negocio usa como sinónimos/homónimos de un material del
 # catálogo. Se sustituyen palabra por palabra, sobre el texto ya normalizado
 # (sin tildes, en minúsculas), ANTES de buscar el material en el catálogo.
