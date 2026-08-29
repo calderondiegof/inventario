@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import time
 import uvicorn
 import tempfile
 import re
@@ -67,11 +68,30 @@ else:
 
 http_client: Optional[httpx.AsyncClient] = None
 BOGOTA = ZoneInfo("America/Bogota")
-# Conjunto de IDs de mensajes de WhatsApp ya procesados.
-# Meta puede reintentar/reentregar un mismo webhook; esta deduplicación
-# evita que el bot responda (y envíe WhatsApp) varias veces por un mismo mensaje.
-_mensajes_whatsapp_procesados: set = set()
+# Deduplicación de mensajes de WhatsApp con TTL. Meta puede reintentar/
+# reentregar un mismo webhook (timeout de DeepSeek/DB, red lenta); esto evita
+# que el bot responda (y registre operaciones) varias veces por un mensaje.
+# Es un DICT id -> timestamp: cada entrada EXPIRA sola (antes era un set que
+# se vaciaba completo al llegar al máximo, dejando pasar reintentos viejos).
+_mensajes_whatsapp_procesados: Dict[str, float] = {}
 _MAX_MENSAJES_PROCESADOS = 5000
+_MENSAJE_TTL_SEGUNDOS = 600.0  # Meta reintenta en minutos; 10 min cubre de sobra
+
+
+def _mensaje_es_duplicado(mensaje_id: str) -> bool:
+    """True si `mensaje_id` ya fue procesado dentro de la ventana TTL.
+    Purga primero las entradas expiradas (purga incremental, no reset total)."""
+    ahora = time.time()
+    expirados = [k for k, ts in _mensajes_whatsapp_procesados.items()
+                 if ahora - ts > _MENSAJE_TTL_SEGUNDOS]
+    for k in expirados:
+        _mensajes_whatsapp_procesados.pop(k, None)
+    if len(_mensajes_whatsapp_procesados) > _MAX_MENSAJES_PROCESADOS:
+        _mensajes_whatsapp_procesados.clear()
+    if mensaje_id in _mensajes_whatsapp_procesados:
+        return True
+    _mensajes_whatsapp_procesados[mensaje_id] = ahora
+    return False
 
 # Expresiones regulares y utilidades
 LINEA_MATERIAL_CANTIDAD = re.compile(r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE)
@@ -1717,7 +1737,12 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, mensaje_faltante)
         return
+    # PROTECCIÓN 1 (estado): el borrador se purga ANTES del guardado final.
+    # Si llega un duplicado/reintento mientras se escribe en DB, el contexto
+    # ya no contiene el payload y la segunda pasada no re-registra nada.
     contexto["campo_esperado"] = None
+    contexto["borrador_pendiente"] = {}
+    await guardar_contexto(usuario_id, contexto)
     try:
         intencion, fecha = datos["intencion"], datos.get("fecha_operacion", fecha_mensaje)
         if intencion == "CONSULTA":
@@ -1742,15 +1767,20 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             return
         elif intencion == "REGISTRO_DIARIO":
             r = await asyncio.to_thread(inventario.registrar_registro_diario, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, entradas=datos.get("entradas_revuelto", []), resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
-            salida = f"Registro diario guardado: {len(r['registros'])} movimientos y merma de {r['merma_kg']:,.2f} kg, fecha {fecha}."
+            salida = (f"⚠️ Registro diario duplicado detectado; ya se había guardado hace instantes (merma {r['merma_kg']:,.2f} kg, fecha {fecha})."
+                      if r.get("duplicado") else
+                      f"Registro diario guardado: {len(r['registros'])} movimientos y merma de {r['merma_kg']:,.2f} kg, fecha {fecha}.")
         elif intencion == "ENTRADA_REVUELTO":
             r = await asyncio.to_thread(inventario.registrar_entrada_revuelto, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, entradas=datos.get("entradas_revuelto", []))
             salida = f"Entrada de Revuelto registrada: {len(r['registros'])} fuente(s), fecha {fecha}."
         elif intencion == "SELECCION_REVUELTO":
             r = await asyncio.to_thread(inventario.registrar_seleccion_revuelto, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
-            salida = (f"Selección registrada: {len(r['registros']) - 1} resultado(s), "
-                      f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:g} kg, "
-                      f"fecha {fecha}.")
+            salida = ("⚠️ Selección duplicada: ya se registró hace instantes "
+                      f"(revuelto: -{r['revuelto_descontado']:g} kg, fecha {fecha}); no se volvió a registrar."
+                      if r.get("duplicado") else
+                      (f"Selección registrada: {len(r['registros']) - 1} resultado(s), "
+                       f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:g} kg, "
+                       f"fecha {fecha}."))
         elif intencion == "TRANSFORMACION_MATERIAL":
             origen = datos.get("material_origen") or "Revuelto"
             r = await asyncio.to_thread(
@@ -1763,8 +1793,10 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                 material_merma_nombre=datos.get("material_merma"),
                 nombre_proceso=datos.get("nombre_proceso") or "Transformación",
             )
-            salida = (f"Transformación registrada desde {r['origen']}: {len(r['registros'])} movimiento(s), "
-                      f"merma {r['merma_kg']:,.2f} kg, fecha {fecha}.")
+            salida = ("⚠️ Transformación duplicada: ya se registró hace instantes; no se volvió a registrar."
+                      if r.get("duplicado") else
+                      (f"Transformación registrada desde {r['origen']}: {len(r['registros'])} movimiento(s), "
+                       f"merma {r['merma_kg']:,.2f} kg, fecha {fecha}."))
         elif intencion == "COMPRA_DIRECTA":
             r = await asyncio.to_thread(inventario.registrar_compra_directa, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, fuente_nombre=datos["fuente_compra"], items=datos["items"])
             salida = f"Compra registrada: {len(r['registros'])} material(es), fecha {fecha}."
@@ -1874,13 +1906,9 @@ async def procesar_webhook(data: Dict[str, Any]) -> None:
             for message in value.get("messages", []):
                 mensaje_id = message.get("id")
                 if mensaje_id:
-                    if mensaje_id in _mensajes_whatsapp_procesados:
-                        logger.info(f"⏭️ Mensaje {mensaje_id} ya procesado; se omite para evitar envíos duplicados.")
+                    if _mensaje_es_duplicado(mensaje_id):
+                        logger.info(f"⏭️ Mensaje {mensaje_id} ya procesado (o dentro de la ventana TTL); se omite para evitar duplicados.")
                         continue
-                    _mensajes_whatsapp_procesados.add(mensaje_id)
-                    # Evitar que el conjunto crezca sin límite en procesos largos.
-                    if len(_mensajes_whatsapp_procesados) > _MAX_MENSAJES_PROCESADOS:
-                        _mensajes_whatsapp_procesados.clear()
                 logger.info(f"📨 Mensaje nuevo: {message}")
                 try:
                     await procesar_un_mensaje(message, value.get("contacts", []))

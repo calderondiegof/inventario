@@ -1,4 +1,6 @@
 import re
+import time
+import hashlib
 import unicodedata
 import uuid
 import difflib
@@ -118,6 +120,50 @@ def borrador_para_nueva_lista(borrador: Optional[Dict[str, Any]],
     if es_lista_materiales(texto):
         borrador_limpio["items"] = []
     return borrador_limpio
+
+
+# --- Idempotencia de operaciones (Protección 2 contra duplicados) -----------
+# Si la MISMA operación (misma bodega/usuario/fecha/ítems/pesos) se intenta
+# registrar de nuevo en un intervalo corto (reintento del webhook de Meta, doble
+# llamada del bot o doble clic del usuario), NO se vuelve a insertar nada en
+# movimientos_inventario: los métodos la detectan y devuelven {"duplicado": True}.
+# Es la segunda capa; la primera es el dedupe de message_id en main.py.
+_HUELLAS_RECIENTES: Dict[str, float] = {}
+_HUELLA_TTL_SEGUNDOS = 30.0
+
+
+def _verificar_duplicada(huella: str) -> bool:
+    """True si una operación con esta huella YA se registró dentro de la
+    ventana TTL (solo CONSULTA; NO graba nada — ver _registrar_huella).
+    Purga antes las entradas expiradas."""
+    ahora = time.time()
+    for k in [k for k, ts in _HUELLAS_RECIENTES.items() if ahora - ts > _HUELLA_TTL_SEGUNDOS]:
+        _HUELLAS_RECIENTES.pop(k, None)
+    return huella in _HUELLAS_RECIENTES
+
+
+def _registrar_huella(huella: str) -> None:
+    """Graba la huella SOLO cuando el guardado en BD fue exitoso. Si una
+    validación falla (stock insuficiente, conservación de masa…), la huella
+    NO queda grabada y el reintento corregido del usuario se procesa normal;
+    si el guardado falla, el usuario puede reintentar sin falso duplicado."""
+    for k in [k for k, ts in _HUELLAS_RECIENTES.items() if time.time() - ts > _HUELLA_TTL_SEGUNDOS]:
+        _HUELLAS_RECIENTES.pop(k, None)
+    _HUELLAS_RECIENTES[huella] = time.time()
+
+
+def _huella_operacion(*partes: Any) -> str:
+    """Huella SHA-256 estable de una operación a partir de sus componentes
+    (bodega, usuario, fecha, pares material/cantidad, merma, total). Las listas
+    se ordenan antes de hashear para que un reintento con el mismo contenido —
+    aunque llegue en otro orden— produzca la MISMA huella."""
+    componentes: List[str] = []
+    for p in partes:
+        if isinstance(p, (list, tuple)):
+            componentes.extend(sorted(str(i) for i in p))
+        else:
+            componentes.append(str(p))
+    return hashlib.sha256("|".join(componentes).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -612,6 +658,17 @@ class InventarioServiceConValidacion:
         total_procesado = self._cantidad(cantidad_revuelto_procesada) if cantidad_revuelto_procesada else total_resultados + merma
         if abs(total_procesado - total_resultados - merma) > 0.01:
             raise ValueError("El Revuelto procesado debe ser igual a resultados aprovechables + merma.")
+        # Protección 2 (idempotencia): la huella se VERIFICA antes de validar
+        # stock (un duplicado real ya consumió el stock y fallaría aquí con un
+        # error confuso) pero se GRABA solo tras el guardado exitoso.
+        huella = _huella_operacion(
+            "SELECCION", bodega_id, usuario_id, fecha,
+            [(m.id, round(c, 2)) for m, c in resultados_validados],
+            round(merma, 2), round(total_procesado, 2),
+        )
+        if _verificar_duplicada(huella):
+            return {"duplicado": True, "lote_id": None, "registros": [],
+                    "merma_kg": merma, "revuelto_descontado": total_procesado}
         disponible = self.obtener_saldo(bodega_id, revuelto.id)
         if disponible + 0.01 < total_procesado:
             raise ValueError(f"Stock insuficiente de Revuelto. Disponible: {disponible:.2f} kg; requerido: {total_procesado:.2f} kg.")
@@ -630,7 +687,9 @@ class InventarioServiceConValidacion:
             "material_origen_id": revuelto.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
             "fecha_operacion": fecha, "observaciones": "Merma de selección; no genera stock vendible",
         }]
-        return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma,
+        registros = self._guardar_lote(movimientos, mermas)
+        _registrar_huella(huella)
+        return {"lote_id": lote_id, "registros": registros, "merma_kg": merma,
                 "revuelto_descontado": total_procesado}
 
     def registrar_registro_diario(self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,
@@ -660,6 +719,17 @@ class InventarioServiceConValidacion:
         disponible = self.obtener_saldo(bodega_id, revuelto.id)
         if disponible + entrada_total + 0.01 < total_procesado:
             raise ValueError(f"Stock insuficiente de Revuelto. Existente: {disponible:.2f} kg; entradas: {entrada_total:.2f} kg; requerido: {total_procesado:.2f} kg.")
+        # Protección 2 (idempotencia): verificación temprana; la huella se
+        # graba tras el guardado exitoso (ver _registrar_huella).
+        huella = _huella_operacion(
+            "REGISTRO_DIARIO", bodega_id, usuario_id, fecha,
+            [(f.id, round(c, 2)) for f, c in entradas_validadas],
+            [(m.id, round(c, 2)) for m, c in resultados_validados],
+            round(merma, 2), round(total_procesado, 2),
+        )
+        if _verificar_duplicada(huella):
+            return {"duplicado": True, "lote_id": None, "registros": [],
+                    "merma_kg": merma, "revuelto_descontado": total_procesado}
         movimientos = [self._movimiento(
             usuario_id=usuario_id, bodega_id=bodega_id, material_id=revuelto.id, fuente_id=fuente.id,
             tipo=TipoTransaccion.ENTRADA_BRUTA, cantidad=cantidad, fecha=fecha, lote_id=lote_id,
@@ -680,7 +750,9 @@ class InventarioServiceConValidacion:
             "material_origen_id": revuelto.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
             "fecha_operacion": fecha, "observaciones": "Merma de selección; no genera stock vendible",
         }]
-        return {"lote_id": lote_id, "registros": self._guardar_lote(movimientos, mermas), "merma_kg": merma,
+        registros = self._guardar_lote(movimientos, mermas)
+        _registrar_huella(huella)
+        return {"lote_id": lote_id, "registros": registros, "merma_kg": merma,
                 "revuelto_descontado": total_procesado}
 
     def registrar_transformacion_material(
@@ -748,6 +820,17 @@ class InventarioServiceConValidacion:
                 f"Stock insuficiente de '{origen.nombre}'. Disponible: {disponible:,.2f} kg; "
                 f"requerido: {total_procesado:,.2f} kg."
             )
+        # Protección 2 (idempotencia): verificación temprana; la huella se
+        # graba tras el guardado exitoso (ver _registrar_huella).
+        huella = _huella_operacion(
+            "TRANSFORMACION", bodega_id, usuario_id, fecha, origen.id,
+            [(m.id, round(c, 2)) for m, c in resultados_validados],
+            round(merma, 2), round(total_procesado, 2),
+        )
+        if _verificar_duplicada(huella):
+            return {"duplicado": True, "lote_id": None, "registros": [], "merma_kg": merma,
+                    "origen": origen.nombre, "tipo_origen": origen.tipo_material,
+                    "materiales_salida": [mat.nombre for mat, _ in resultados_validados]}
 
         fuente_proceso = self._fuente_por_tipo("PROCESO_SELECCION")
 
@@ -780,6 +863,7 @@ class InventarioServiceConValidacion:
                 }]
 
         registros = self._guardar_lote(movimientos, mermas)
+        _registrar_huella(huella)
         return {
             "lote_id": lote_id, "registros": registros, "merma_kg": merma,
             "origen": origen.nombre, "tipo_origen": origen.tipo_material,
