@@ -23,7 +23,8 @@ from supabase import Client, create_client
 from reporte_grafico import generar_y_subir_grafico_stock
 from generador_pdf import generar_remision_pdf_archivo
 from services.inventario_service import (
-    InventarioServiceConValidacion, normalizar, agrupar_en_secciones_para_lista,
+    InventarioServiceConValidacion, normalizar,
+    construir_lista_texto_whatsapp, construir_seccion_lista_interactiva,
     borrador_para_nueva_lista, es_lista_materiales,
 )
 from services.currency_service import obtener_tasa_dolar
@@ -759,17 +760,24 @@ async def enviar_botones_whatsapp(destino: str, texto: str, opciones: List[tuple
 
 async def enviar_lista_whatsapp(destino: str, texto: str, titulo_boton: str,
                                 filas: List[tuple], titulo_lista: str = "Opciones") -> None:
-    """Envía un Interactive List Message (API oficial de Meta): el usuario pulsa
-    `titulo_boton` y ve un listado desplegable con el catálogo COMPLETO.
-    Cada fila es (id, titulo, [descripcion]); al elegir una, el webhook entrega
-    su `id` en interactive.list_reply.id (ya se captura al inicio de
-    procesar_un_mensaje, por lo que reengancha con los flujos existentes).
+    """Envía un catálogo/listado de materiales por WhatsApp con el método que
+    respete el límite de la API.
 
-    Se agrupa el total de filas en secciones de a lo sumo 10 (agrupar_en_secciones
-    _para_lista) para respetar el límite de la API de Meta (10 filas/sección × 10
-    secciones) y listar así todos los materiales (>10) en un único mensaje, sin
-    truncar la consulta del catálogo."""
-    sections = agrupar_en_secciones_para_lista(filas, titulo_lista=titulo_lista)
+    - Si hay <=10 elementos: Interactive List Message (máx 10 filas totales;
+      superarlo dispara el error 400 #131009 de Meta). Cada fila es
+      (id, titulo, [descripcion]); al elegir un ítem, el webhook entrega su `id`
+      en interactive.list_reply.id.
+    - Si hay >10 elementos (ej. 30+ materiales): NO se usa el tipo 'list'; se
+      envía un mensaje de TEXTO normal con viñetas ordenado alfabéticamente
+      (construir_lista_texto_whatsapp). El nombre del material (title) queda
+      disponible para que el usuario lo escriba y reenganche el flujo."""
+    filas = list(filas)
+    if len(filas) > 10:
+        nombres = [str(f[1]) for f in filas]
+        await enviar_mensaje_whatsapp(destino,
+                                      construir_lista_texto_whatsapp(nombres, titulo=titulo_lista))
+        return
+    sections = construir_seccion_lista_interactiva(filas, titulo_lista=titulo_lista)
     payload = _payload_base_whatsapp(destino, "interactive")
     payload["interactive"] = {
         "type": "list",

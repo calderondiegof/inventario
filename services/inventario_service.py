@@ -38,31 +38,46 @@ def normalizar(texto: str) -> str:
     return re.sub(r"\s+", " ", texto)
 
 
-def agrupar_en_secciones_para_lista(filas: Iterable, titulo_lista: str = "Materiales",
-                                    max_filas: int = 10) -> List[Dict[str, Any]]:
-    """Agrupa filas de un Interactive List Message de WhatsApp en secciones de
-    a lo sumo `max_filas` filas, y devuelve TODAS las secciones sin truncar
-    ninguna fila.
+def construir_lista_texto_whatsapp(items: Iterable[str],
+                                   titulo: str = "Catálogo de Materiales") -> str:
+    """Crea un mensaje de TEXTO con viñetas para listar más de 10 ítems.
 
-    La API de Meta permite hasta 10 filas por sección y hasta 10 secciones por
-    mensaje (máx ~100 filas). Con esto se puede listar el catálogo COMPLETO
-    (30+ materiales) en un único List Message, en vez de limitarse a 10.
+    La API de WhatsApp Cloud limita los Interactive List Messages a 10 filas
+    TOTALES (error #131009). Para catálogos mayores (30+ materiales) se envía
+    texto plano ordenado alfabéticamente, evitando el error 400.
 
-    Cada fila de entrada es (id, titulo, [descripcion]) y se normaliza a
-    {id, title, description} (con los límites de longitud de la API).
+    Formato (requerido):
+      📋 *{titulo}* ({n} disponibles):
+
+      • {material}
+
+      _Escribe el nombre del material o el código para continuar._
     """
-    filas = list(filas)
-    secciones: List[Dict[str, Any]] = []
-    for i in range(0, len(filas), max_filas):
-        rows = []
-        for fila in filas[i:i + max_filas]:
-            id_, titulo = fila[0], fila[1]
-            row: Dict[str, Any] = {"id": str(id_)[:200], "title": str(titulo)[:24]}
-            if len(fila) > 2 and fila[2]:
-                row["description"] = str(fila[2])[:72]
-            rows.append(row)
-        secciones.append({"title": str(titulo_lista)[:24], "rows": rows})
-    return secciones
+    nombres = sorted({str(i) for i in items})  # alfabético y sin duplicados
+    lineas = "\n".join(f"• {n}" for n in nombres)
+    return (
+        f"📋 *{titulo}* ({len(nombres)} disponibles):\n\n"
+        f"{lineas}\n\n"
+        f"_Escribe el nombre del material o el código para continuar._"
+    )
+
+
+def construir_seccion_lista_interactiva(filas: Iterable,
+                                        titulo_lista: str = "Materiales") -> List[Dict[str, Any]]:
+    """Devuelve las sections de un Interactive List Message de WhatsApp.
+
+    La API limita el TOTAL de filas a 10 (error #131009), por lo que esta
+    función se usa SOLO cuando hay <=10 elementos; si hay más, main.py debe
+    optar por texto (construir_lista_texto_whatsapp). Cada fila de entrada es
+    (id, titulo, [descripcion])."""
+    rows = []
+    for fila in filas:
+        id_, titulo = fila[0], fila[1]
+        row: Dict[str, Any] = {"id": str(id_)[:200], "title": str(titulo)[:24]}
+        if len(fila) > 2 and fila[2]:
+            row["description"] = str(fila[2])[:72]
+        rows.append(row)
+    return [{"title": str(titulo_lista)[:24], "rows": rows}]
 
 
 # Palabras que el negocio usa como sinónimos/homónimos de un material del

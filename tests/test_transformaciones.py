@@ -29,7 +29,7 @@ from services.inventario_service import (
     InventarioServiceConValidacion,
     TipoTransaccion,
     MaterialDTO,
-    normalizar, agrupar_en_secciones_para_lista,
+    normalizar, construir_lista_texto_whatsapp, construir_seccion_lista_interactiva,
     es_lista_materiales,
     borrador_para_nueva_lista,
 )
@@ -640,24 +640,38 @@ def test_catalogo_completo_mas_de_30():
     _cons("catalogo: recarga conserva los 35", len(inv.catalogo_materiales) == 35)
 
 
-def test_agrupar_secciones_lista_completa():
-    """El agrupado del List Message de WhatsApp NO trunca a 10: 35 filas se
-    reparten en secciones de a lo sumo 10 (límite de la API de Meta) y se
-    conservan todas (10/sección × ½ secciones)."""
-    filas = [(i, f"Material {i}", "LIMPIO") for i in range(35)]
-    secciones = agrupar_en_secciones_para_lista(filas, titulo_lista="Materiales")
-    total = sum(len(s["rows"]) for s in secciones)
-    _cons("secciones: total de filas sin truncar (35)", total == 35)
-    _cons("secciones: máximo 10 filas por sección",
-          all(len(s["rows"]) <= 10 for s in secciones))
-    _cons("secciones: 4 secciones para 35 filas", len(secciones) == 4)
-    _cons("secciones: fila formateada {id,title,description}",
-          secciones[0]["rows"][0] ==
-          {"id": "0", "title": "Material 0", "description": "LIMPIO"})
-    # Con <10 filas se conserva una sola sección (retrocompatibilidad).
-    secciones2 = agrupar_en_secciones_para_lista([(1, "X")], titulo_lista="L")
-    _cons("secciones: <10 filas -> 1 sección",
-          len(secciones2) == 1 and len(secciones2[0]["rows"]) == 1)
+def test_lista_whatsapp_selecciona_formato():
+    """Opción A: la elección del envío depende del total de elementos.
+    - >10 elementos -> TEXTO normal con viñetas, ordenado alfabéticamente,
+      formato ESTRICTO (evita el error 400 #131009).
+    - <=10 elementos -> secciones de Interactive List (sin exceder 10 filas)."""
+    # >10: texto de viñetas con el formato exacto requerido.
+    nombres = ["Cobre", "Aluminio", "Acero", "Bronce", "Basura", "Carter",
+               "Cable", "Perfil", "Olla", "Radiador", "Rechazo de cobre y bronce"]
+    msg = construir_lista_texto_whatsapp(nombres, titulo="Catálogo de Materiales")
+    _cons("texto: encabezado con título y total (35 disponibles) correcto",
+          msg.startswith("📋 *Catálogo de Materiales* (11 disponibles):"))
+    # Orden alfabético de las viñetas.
+    orden = [l.strip("• ").strip() for l in msg.splitlines() if l.startswith("•")]
+    _cons("texto: orden alfabético", orden == sorted(nombres))
+    _cons("texto: incluye TODOS los ítems (>10 sin truncar)", len(orden) == 11)
+    _cons("texto: pie con instrucción",
+          msg.rstrip().endswith("_Escribe el nombre del material o el código para continuar._"))
+    # Sin duplicados y con caracteres compuestos conservados.
+    msg_dup = construir_lista_texto_whatsapp(["Acero", "Acero", "Rechazo de cobre y bronce"])
+    _cons("texto: sin duplicados y conserva frases compuestas",
+          msg_dup.count("• Acero") == 1
+          and "• Rechazo de cobre y bronce" in msg_dup)
+    # <=10: se genera una sola sección con el total de filas (sin truncar).
+    filas = [(i, f"Material {i}") for i in range(8)]
+    sections = construir_seccion_lista_interactiva(filas, titulo_lista="Materiales")
+    _cons("interactivo: 1 sección con 8 filas (<=10)",
+          len(sections) == 1 and len(sections[0]["rows"]) == 8
+          and sections[0]["title"] == "Materiales")
+    filas10 = [(i, f"M{i}") for i in range(10)]
+    s10 = construir_seccion_lista_interactiva(filas10)
+    _cons("interactivo: 10 filas es el máximo permitido",
+          len(s10[0]["rows"]) == 10)
 
 
 def main():
@@ -674,7 +688,7 @@ def main():
     test_mensaje_seleccion_revuelto()
     test_caso_produccion_basura_merma_y_omitidos()
     test_catalogo_completo_mas_de_30()
-    test_agrupar_secciones_lista_completa()
+    test_lista_whatsapp_selecciona_formato()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1
