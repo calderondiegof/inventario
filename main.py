@@ -1020,9 +1020,14 @@ async def guardar_contexto(usuario_id: int, contexto: Dict[str, Any]) -> None:
     await asyncio.to_thread(lambda: supabase.table("usuarios").update({"contexto_operacion": contexto}).eq("id", usuario_id).execute())
 
 
-async def construir_mensaje_seleccion(r: Dict[str, Any], fecha: str,
+def construir_mensaje_seleccion(r: Dict[str, Any], fecha: str,
                                 omitidos: Optional[List[str]] = None) -> str:
     """Plantilla ESTRICTA de la confirmación de selección por WhatsApp.
+
+    Función SÍNCRONA a propósito: no realiza ningún `await`, por lo que se
+    llama directamente en el dispatch de `procesar_un_mensaje`. (Si fuera
+    `async def`, un llamado sin `await` enviaría un objeto coroutine como
+    mensaje en vez del texto real.)
 
     Formato base:
       ✅ Selección registrada: {n} resultado(s), merma {merma:.2f} kg,
