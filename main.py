@@ -2036,13 +2036,38 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         datos = dict(borrador_anterior)
         clave = VENTA_CAMPOS_PASO[campo_esperado]
         valor = texto.strip()
-        # Si el usuario incluye la etiqueta del paso (ej. "placa ABC123", "id 1098")
-        # se extrae solo el valor mediante el parser de campos; si no, se toma el
-        # texto tal cual.
-        campos_parseados = parsear_campos_cliente_venta(texto)
-        if clave in campos_parseados:
-            valor = campos_parseados[clave]
-        datos[clave] = valor
+        # Unificación con el módulo Crear: en los pasos de Nombre de Cliente y
+        # Nombre de Conductor, si el usuario envía el DATO EN BLOQUE (varias
+        # líneas: nombre + CC + tel + dirección o + placa), se parsea con el
+        # MISMO parser del módulo Crear (parsear_bloque_persona) y se llenan
+        # todos los campos extraíbles del borrador. Si no es un bloque, se usa
+        # el mecanismo clásico (etiquetas 'placa:', 'id:' o valores por coma).
+        if clave in ("cliente", "cliente_conductor"):
+            bloque = parsear_bloque_persona(texto)
+            if bloque.get("nombre"):
+                datos[clave] = bloque["nombre"]
+                if clave == "cliente":
+                    datos["cliente_documento"] = bloque.get("identificacion") or datos.get("cliente_documento")
+                    datos["cliente_celular"] = bloque.get("telefono") or datos.get("cliente_celular")
+                    datos["cliente_direccion"] = bloque.get("direccion") or datos.get("cliente_direccion")
+                else:
+                    datos["cliente_conductor_id"] = bloque.get("identificacion") or datos.get("cliente_conductor_id")
+                    datos["cliente_conductor_celular"] = bloque.get("telefono") or datos.get("cliente_conductor_celular")
+                    datos["cliente_placa"] = bloque.get("placa") or datos.get("cliente_placa")
+            else:
+                campos_parseados = parsear_campos_cliente_venta(texto)
+                if clave in campos_parseados:
+                    datos[clave] = campos_parseados[clave]
+                else:
+                    datos[clave] = valor
+        else:
+            # Si el usuario incluye la etiqueta del paso (ej. "placa ABC123",
+            # "id 1098") se extrae solo el valor mediante el parser de campos;
+            # si no, se toma el texto tal cual.
+            campos_parseados = parsear_campos_cliente_venta(texto)
+            if clave in campos_parseados:
+                valor = campos_parseados[clave]
+            datos[clave] = valor
     elif campo_esperado in {"tipo_movimiento", "menu_ingreso"}:
         datos = dict(borrador_anterior)
         eleccion = texto.strip().lower()
