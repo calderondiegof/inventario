@@ -40,26 +40,159 @@ def normalizar(texto: str) -> str:
 
 def construir_lista_texto_whatsapp(items: Iterable[str],
                                    titulo: str = "Catálogo de Materiales") -> str:
-    """Crea un mensaje de TEXTO con viñetas para listar más de 10 ítems.
+    """Crea un mensaje de TEXTO con la lista numerada de ítems (>10 de forma típica).
 
     La API de WhatsApp Cloud limita los Interactive List Messages a 10 filas
     TOTALES (error #131009). Para catálogos mayores (30+ materiales) se envía
     texto plano ordenado alfabéticamente, evitando el error 400.
 
-    Formato (requerido):
+    Cada línea se numera correlativamente con enumerate(..., 1) para que el
+    usuario pueda responder "6" y el sistema resuelva la posición 6 (ver
+    resolver_entrada_material).
+
+    Formato:
       📋 *{titulo}* ({n} disponibles):
 
-      • {material}
+      1. {material}
+      2. {material}
+      ...
 
       _Escribe el nombre del material o el código para continuar._
     """
     nombres = sorted({str(i) for i in items})  # alfabético y sin duplicados
-    lineas = "\n".join(f"• {n}" for n in nombres)
-    return (
-        f"📋 *{titulo}* ({len(nombres)} disponibles):\n\n"
-        f"{lineas}\n\n"
-        f"_Escribe el nombre del material o el código para continuar._"
-    )
+    lineas = [f"📋 *{titulo}* ({len(nombres)} disponibles):\n"]
+    for idx, mat in enumerate(nombres, 1):
+        nombre = mat.get("nombre") if isinstance(mat, dict) else mat
+        lineas.append(f"{idx}. {nombre}")
+    lineas.append("\n_Escribe el nombre del material o el código para continuar._")
+    return "\n".join(lineas)
+
+
+def resolver_entrada_material(texto: str,
+                              nombres_ordenados: Iterable[str]) -> Optional[str]:
+    """Dado lo que escribe el usuario tras ver la lista numerada, devuelve el
+    nombre del material a consultar:
+      - Si es un número '6' -> nombres_ordenados[5] (posición 6 de la lista
+        que se mostró, que está ordenada alfabéticamente).
+      - Si es un nombre -> se devuelve tal cual (se resuelve por coincidencia).
+    Devuelve None si el índice está fuera de rango."""
+    t = (texto or "").strip()
+    if not t:
+        return None
+    nombres = [str(n) for n in (nombres_ordenados or [])]
+    if t.isdigit():
+        idx = int(t)
+        if 1 <= idx <= len(nombres):
+            return nombres[idx - 1]
+        return None
+    return t
+
+
+def _parsear_numero_moneda(texto: str) -> Optional[float]:
+    """Parsea un número escrito con formato español o inglés (misma semántica
+    que main._parsear_numero): '4120,50' -> 4120.5 | '1.250.000' -> 1250000 |
+    '1,250.50' -> 1250.5. Devuelve None si no es válido."""
+    t = (texto or "").strip().replace(" ", "").replace("$", "")
+    if not t:
+        return None
+    if "," in t and "." in t:
+        if t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            t = t.replace(",", "")
+    elif "," in t:
+        t = t.replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def formatear_resumen_precios(items: Iterable[Dict[str, Any]],
+                              precios: Dict[str, float]) -> str:
+    """Construye el resumen FINAL enumerado (1..N) del flujo de precios de una
+    Remisión, con instrucciones ultra claras para quien lo recibe por WhatsApp.
+
+    - 'OK' o 'SI' procesa la orden.
+    - '[número] [precio]' corrige un ítem (ej. '2 16700').
+    - '0' o 'CANCELAR' anula la operación.
+    """
+    lineas = ["📋 *Resumen de precios por kilo:*", ""]
+    for i, it in enumerate(items, 1):
+        precio = (precios or {}).get(str(it["movimiento_id"]))
+        precio_txt = f"{precio:,.2f}" if precio is not None else "—"
+        lineas.append(f"{i}. {it['material_nombre']} ({it['cantidad_kg']:,.2f} kg): {precio_txt} /kg")
+    lineas += [
+        "",
+        "_Instrucciones:_",
+        "• Escribe *OK* o *SI* para procesar la orden.",
+        "• Para corregir un ítem: *[número] [nuevo_precio]* (ej. *2 16700*).",
+        "• Escribe *0* o *CANCELAR* para anular la operación.",
+    ]
+    return "\n".join(lineas)
+
+
+def parsear_edicion_precio(texto: str) -> Optional[Tuple[int, float]]:
+    """Parsea la corrección de un ítem del resumen: '[número] [nuevo_precio]'
+    (ej. '2 16700'). Devuelve (indice_1, precio_float) o None si no coincide."""
+    m = re.fullmatch(r"\s*(\d+)\s+([\d.,]+)\s*", (texto or "").strip())
+    if not m:
+        return None
+    idx = int(m.group(1))
+    precio = _parsear_numero_moneda(m.group(2))
+    if idx < 1 or precio is None or precio <= 0:
+        return None
+    return (idx, precio)
+
+
+def procesar_precio_paso_a_paso(texto: str, items: Iterable[Dict[str, Any]],
+                                precios: Dict[str, float],
+                                indice: int) -> Dict[str, Any]:
+    """Procesa la respuesta del usuario en el bucle de captura de precios por
+    kilo, ítem por ítem. Devuelve un dict con la nueva fotografía del estado:
+
+      {'tipo': 'ok'|'corregir'|'invalido',
+       'precios': dict actualizado,
+       'indice': int nuevo,
+       'texto': str mensaje del bot}
+
+    Reglas:
+      - 'ok': se registró el precio del ítem `indice`; precios con la nueva
+        clave; `indice` avanza +1.
+      - 'corregir': el usuario escribió '0' -> se DESCARTA el precio del
+        material anterior (`indice-1`, ya registrado) y se vuelve a solicitar
+        (indice -1). Corrige ágilmente el paso a paso.
+      - 'invalido': precio no válido (o '0' sin ítem anterior): sin cambios.
+    """
+    items = list(items)
+    precio = _parsear_numero_moneda(texto)
+    precios = dict(precios or {})
+
+    # '0' con un ítem anterior -> descartar el anterior y repetirlo.
+    if precio == 0 and indice >= 1 and indice <= len(items):
+        anterior = items[indice - 1]
+        precios.pop(str(anterior["movimiento_id"]), None)
+        return {
+            "tipo": "corregir", "precios": precios, "indice": indice - 1,
+            "texto": (f"✖ Se descartó el precio de {anterior['material_nombre']}. "
+                      f"Ingrese nuevamente su precio por kilo (en moneda local) "
+                      f"({anterior['cantidad_kg']:,.2f} kg):"),
+        }
+
+    if precio is None or precio < 0 or precio == 0:
+        return {
+            "tipo": "invalido", "precios": precios, "indice": indice,
+            "texto": ("Precio inválido. Ingrese el precio por kilo en moneda local "
+                      "(ejemplo: 3500), escriba '0' para corregir el anterior "
+                      "o *cancelar*."),
+        }
+
+    actual = items[indice]
+    precios[str(actual["movimiento_id"])] = precio
+    return {
+        "tipo": "ok", "precios": precios, "indice": indice + 1,
+        "texto": f"Precio registrado: {precio:,.2f}/kg.",
+    }
 
 
 def construir_seccion_lista_interactiva(filas: Iterable,

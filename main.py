@@ -25,7 +25,8 @@ from generador_pdf import generar_remision_pdf_archivo
 from services.inventario_service import (
     InventarioServiceConValidacion, normalizar,
     construir_lista_texto_whatsapp, construir_seccion_lista_interactiva,
-    borrador_para_nueva_lista, es_lista_materiales,
+    borrador_para_nueva_lista, es_lista_materiales, resolver_entrada_material,
+    formatear_resumen_precios, parsear_edicion_precio, procesar_precio_paso_a_paso,
 )
 from services.currency_service import obtener_tasa_dolar
 
@@ -1376,33 +1377,64 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                         f"{primer['material_nombre']} ({primer['cantidad_kg']:,.2f} kg):"
                     )
             elif accion["tipo"] == "captura_precio_material":
-                # Paso 4: bucle de precios por kilo, ítem por ítem; al terminar
-                # se ejecuta la aprobación final (paso 5) vía RPC.
-                precio = _parsear_numero(texto)
-                if precio is None or precio < 0:
-                    respuesta_texto = ("Precio inválido. Ingrese el precio por kilo en moneda local "
-                                       "(ejemplo: 3500) o escriba 'cancelar'.")
+                # Paso 4: bucle de precios por kilo, ítem por ítem.
+                # - Si el usuario escribe "0" se DESCARTA el precio del material
+                #   anterior y se vuelve a solicitar (corrección ágil).
+                # - Al terminar se muestra el resumen enumerado editable.
+                res = procesar_precio_paso_a_paso(
+                    texto, accion["items"], accion["precios"], accion.get("indice", 0))
+                accion["precios"] = res["precios"]
+                accion["indice"] = res["indice"]
+                if res["tipo"] == "corregir":
+                    respuesta_texto = res["texto"]
+                elif res["tipo"] == "invalido":
+                    respuesta_texto = res["texto"]
+                elif res["indice"] < len(accion["items"]):
+                    sig = accion["items"][res["indice"]]
+                    respuesta_texto = (
+                        f"{res['texto']}\n\n"
+                        f"Ingrese el precio por kilo (en moneda local) para "
+                        f"{sig['material_nombre']} ({sig['cantidad_kg']:,.2f} kg):"
+                    )
                 else:
-                    actual = accion["items"][accion["indice"]]
-                    accion["precios"][str(actual["movimiento_id"])] = precio
-                    accion["indice"] += 1
-                    if accion["indice"] < len(accion["items"]):
-                        sig = accion["items"][accion["indice"]]
-                        respuesta_texto = (
-                            f"Precio registrado: {precio:,.2f}/kg.\n\n"
-                            f"Ingrese el precio por kilo (en moneda local) para "
-                            f"{sig['material_nombre']} ({sig['cantidad_kg']:,.2f} kg):"
-                        )
+                    # Último precio capturado -> resumen final editable.
+                    accion["tipo"] = "resumen_precios"
+                    respuesta_texto = formatear_resumen_precios(accion["items"], accion["precios"])
+            elif accion["tipo"] == "resumen_precios":
+                # Resumen final: OK/SI procesa; "[n] [precio]" corrige; 0/cancelar anula.
+                eleccion = texto.strip().lower()
+                if eleccion in {"cancelar", "0"}:
+                    contexto["accion_pendiente"] = {}
+                    respuesta_texto = ("Operación de aprobación anulada. "
+                                       "Los precios no fueron guardados.")
+                elif eleccion in {"ok", "si"}:
+                    accion["tipo"] = "seleccion_modo_pdf"
+                    respuesta_texto = (
+                        "¿Cómo deseas que se impriman los valores en el PDF de la Remisión?\n"
+                        "1. Moneda local\n2. Moneda dólares\n3. Ambas monedas\n4. Sin valores"
+                    )
+                else:
+                    edit = parsear_edicion_precio(texto)
+                    if edit:
+                        num_idx, precio_nuevo = edit
+                        if 1 <= num_idx <= len(accion["items"]):
+                            item = accion["items"][num_idx - 1]
+                            accion["precios"][str(item["movimiento_id"])] = precio_nuevo
+                            respuesta_texto = (
+                                f"✅ Ítem {num_idx} ({item['material_nombre']}) actualizado "
+                                f"a {precio_nuevo:,.2f}/kg.\n\n"
+                                + formatear_resumen_precios(accion["items"], accion["precios"])
+                            )
+                        else:
+                            respuesta_texto = (
+                                f"Ítem fuera de rango (1-{len(accion['items'])}). "
+                                f"Usa el formato *[número] [nuevo_precio]* (ej. *2 16700*)."
+                            )
                     else:
-                        # Último precio capturado: se pregunta cómo imprimir los
-                        # valores en el PDF antes de aprobar (paso 5).
-                        accion["tipo"] = "seleccion_modo_pdf"
                         respuesta_texto = (
-                            "¿Cómo deseas que se impriman los valores en el PDF de la Remisión?\n"
-                            "1. Moneda local\n"
-                            "2. Moneda dólares\n"
-                            "3. Ambas monedas\n"
-                            "4. Sin valores"
+                            "No entendí. Escribe *OK*/*SI* para procesar la orden, "
+                            "*[número] [nuevo_precio]* (ej. *2 16700*) para corregir un ítem, "
+                            "o *0*/*CANCELAR* para anular."
                         )
             elif accion["tipo"] == "seleccion_modo_pdf":
                 # Paso 5: elección del formato de valores del PDF final y
@@ -1494,43 +1526,62 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                 else:
                     texto_buscado = texto.lower().strip()
 
-                    # Se buscan TODOS los materiales cuyo nombre contenga lo escrito;
-                    # así, si hay varias coincidencias, no se adivina: se confirma.
-                    coincidencias = [
-                        mat for mat in inventario.catalogo_materiales.values()
-                        if texto_buscado in mat.nombre.lower()
-                    ]
-
-                    # Sin coincidencias por subcadena: se intenta el buscador
-                    # exacto/tolerante por si fue un error de tipeo o un sinónimo.
-                    if not coincidencias:
-                        try:
-                            posible = inventario.obtener_material_por_nombre(texto)
-                            coincidencias = [posible] if posible else []
-                        except Exception:
-                            coincidencias = []
-
-                    if len(coincidencias) == 1:
-                        material_encontrado = coincidencias[0]
-                    elif len(coincidencias) > 1:
-                        # AMBIGUO: se pide al usuario que confirme con el número
-                        # o el nombre exacto de la lista.
-                        nombre_unicos = list(dict.fromkeys(m.nombre for m in coincidencias))
-                        contexto["accion_pendiente"] = {
-                            "tipo": "confirmar_material",
-                            "candidatos": nombre_unicos,
-                            "texto_buscado": texto,
-                        }
-                        await guardar_contexto(usuario_id, contexto)
-                        lista = "\n".join(f"{i+1}. {n}" for i, n in enumerate(nombre_unicos))
-                        await enviar_mensaje_whatsapp(
-                            telefono,
-                            f"Varios materiales coinciden con '{texto}'. "
-                            f"Escribe el número del que quieres o el nombre exacto:\n\n{lista}",
+                    # El catálogo se muestra como "1. Acero, 2. ..." (orden
+                    # alfabético). Si el usuario envía un número (ej. "6"), se
+                    # resuelve la posición 6 de esa misma lista ordenada.
+                    materiales_ordenados = sorted(
+                        inventario.catalogo_materiales.values(), key=lambda m: m.nombre
+                    )
+                    if texto_buscado.isdigit():
+                        nombre_resuelto = resolver_entrada_material(
+                            texto_buscado, [m.nombre for m in materiales_ordenados]
                         )
-                        return
+                        material_encontrado = (
+                            inventario.obtener_material_por_nombre(nombre_resuelto)
+                            if nombre_resuelto else None
+                        )
+                        _coincidencias_finalizadas = True
                     else:
-                        material_encontrado = None
+                        _coincidencias_finalizadas = False
+
+                    if not _coincidencias_finalizadas:
+                        # Se buscan TODOS los materiales cuyo nombre contenga lo
+                        # escrito; así, si hay varias coincidencias, no se adivina.
+                        coincidencias = [
+                            mat for mat in materiales_ordenados
+                            if texto_buscado in mat.nombre.lower()
+                        ]
+
+                        # Sin coincidencias por subcadena: se intenta el buscador
+                        # exacto/tolerante por si fue un error de tipeo o sinónimo.
+                        if not coincidencias:
+                            try:
+                                posible = inventario.obtener_material_por_nombre(texto)
+                                coincidencias = [posible] if posible else []
+                            except Exception:
+                                coincidencias = []
+
+                        if len(coincidencias) == 1:
+                            material_encontrado = coincidencias[0]
+                        elif len(coincidencias) > 1:
+                            # AMBIGUO: se pide al usuario que confirme con el
+                            # número o el nombre exacto de la lista.
+                            nombre_unicos = list(dict.fromkeys(m.nombre for m in coincidencias))
+                            contexto["accion_pendiente"] = {
+                                "tipo": "confirmar_material",
+                                "candidatos": nombre_unicos,
+                                "texto_buscado": texto,
+                            }
+                            await guardar_contexto(usuario_id, contexto)
+                            lista = "\n".join(f"{i+1}. {n}" for i, n in enumerate(nombre_unicos))
+                            await enviar_mensaje_whatsapp(
+                                telefono,
+                                f"Varios materiales coinciden con '{texto}'. "
+                                f"Escribe el número del que quieres o el nombre exacto:\n\n{lista}",
+                            )
+                            return
+                        else:
+                            material_encontrado = None
 
                     if not material_encontrado:
                         respuesta_texto = f"No encontré el material '{texto}'. Intenta de nuevo o escribe *cancelar*."

@@ -31,8 +31,9 @@ from services.inventario_service import (
     TipoTransaccion,
     MaterialDTO,
     normalizar, construir_lista_texto_whatsapp, construir_seccion_lista_interactiva,
-    es_lista_materiales,
+    es_lista_materiales, resolver_entrada_material,
     borrador_para_nueva_lista,
+    formatear_resumen_precios, parsear_edicion_precio, procesar_precio_paso_a_paso,
 )
 
 
@@ -643,26 +644,44 @@ def test_catalogo_completo_mas_de_30():
 
 def test_lista_whatsapp_selecciona_formato():
     """Opción A: la elección del envío depende del total de elementos.
-    - >10 elementos -> TEXTO normal con viñetas, ordenado alfabéticamente,
-      formato ESTRICTO (evita el error 400 #131009).
+    - >10 elementos -> TEXTO normal, ordenado alfabéticamente, con lista
+      NUMERADA (1. Acero, 2. ... ; ver resolver_entrada_material). Evita el
+      error 400 #131009 y permite responder por número.
     - <=10 elementos -> secciones de Interactive List (sin exceder 10 filas)."""
-    # >10: texto de viñetas con el formato exacto requerido.
+    import re as _re
+    # >10: texto numerado con el formato exacto requerido.
     nombres = ["Cobre", "Aluminio", "Acero", "Bronce", "Basura", "Carter",
                "Cable", "Perfil", "Olla", "Radiador", "Rechazo de cobre y bronce"]
     msg = construir_lista_texto_whatsapp(nombres, titulo="Catálogo de Materiales")
-    _cons("texto: encabezado con título y total (35 disponibles) correcto",
+    _cons("texto: encabezado con título y total (11 disponibles) correcto",
           msg.startswith("📋 *Catálogo de Materiales* (11 disponibles):"))
-    # Orden alfabético de las viñetas.
-    orden = [l.strip("• ").strip() for l in msg.splitlines() if l.startswith("•")]
+    # Orden alfabético de las líneas numeradas (sin viñetas '•').
+    orden = [_re.sub(r"^\d+\.\s*", "", l).strip()
+             for l in msg.splitlines() if _re.match(r"^\d+\.\s", l)]
+    _cons("texto: lista numerada 1..N, sin viñetas", len(orden) == 11
+          and "1. Acero" in msg and "•" not in msg.splitlines()[2:6][0])
     _cons("texto: orden alfabético", orden == sorted(nombres))
     _cons("texto: incluye TODOS los ítems (>10 sin truncar)", len(orden) == 11)
     _cons("texto: pie con instrucción",
           msg.rstrip().endswith("_Escribe el nombre del material o el código para continuar._"))
+    # Numeración consecutiva por enumerate.
+    _cons("texto: numeración consecutiva 1..11",
+          [int(_re.match(r"^(\d+)\.", l).group(1)) for l in msg.splitlines()
+           if _re.match(r"^\d+\.\s", l)] == list(range(1, 12)))
     # Sin duplicados y con caracteres compuestos conservados.
     msg_dup = construir_lista_texto_whatsapp(["Acero", "Acero", "Rechazo de cobre y bronce"])
     _cons("texto: sin duplicados y conserva frases compuestas",
-          msg_dup.count("• Acero") == 1
-          and "• Rechazo de cobre y bronce" in msg_dup)
+          msg_dup.count("Acero") == 1
+          and "Rechazo de cobre y bronce" in msg_dup)
+    # Resolución por índice: '6' -> 6º material de la lista ordenada.
+    ordenados = sorted(nombres)
+    _cons("resolver: '6' -> posición 6 alfabética",
+          resolver_entrada_material("6", ordenados) == ordenados[5])
+    _cons("resolver: devuelve el nombre tal cual",
+          resolver_entrada_material("Acero", ordenados) == "Acero")
+    _cons("resolver: índice fuera de rango -> None",
+          resolver_entrada_material("99", ordenados) is None
+          and resolver_entrada_material("", ordenados) is None)
     # <=10: se genera una sola sección con el total de filas (sin truncar).
     filas = [(i, f"Material {i}") for i in range(8)]
     sections = construir_seccion_lista_interactiva(filas, titulo_lista="Materiales")
@@ -744,6 +763,66 @@ def test_grafico_otros_max_10():
           len(out8) == 8 and not out8["material"].str.startswith("Otros (").any())
 
 
+def test_captura_precios_correccion_y_edicion():
+    """Flujo de captura de precios de Remisión:
+    - '0' en el paso a paso descarta el precio del material ANTERIOR y lo vuelve
+      a solicitar (corrección ágil).
+    - El resumen final enumera 1..N con instrucciones; '2 16700' edita el ítem 2."""
+    items = [
+        {"movimiento_id": "aaa", "material_nombre": "Cobre", "cantidad_kg": 100.0},
+        {"movimiento_id": "bbb", "material_nombre": "Bronce", "cantidad_kg": 50.0},
+        {"movimiento_id": "ccc", "material_nombre": "Carter", "cantidad_kg": 30.0},
+    ]
+
+    # Captura normal: ítem 0 y 1 registrados; indice queda en 1 (hay 2 registrados).
+    r0 = procesar_precio_paso_a_paso("3500", items, {}, 0)
+    _cons("precio: ítem 1 registrado (ok, indice 1)",
+          r0["tipo"] == "ok" and r0["indice"] == 1 and "aaa" in r0["precios"])
+    r1 = procesar_precio_paso_a_paso("16700", items, r0["precios"], r0["indice"])
+    _cons("precio: ítem 2 registrado (ok, indice 2)",
+          r1["tipo"] == "ok" and r1["indice"] == 2
+          and r1["precios"]["aaa"] == 3500.0 and r1["precios"]["bbb"] == 16700.0)
+
+    # Corrección con '0': al solicitar el ítem 3 (indice 2), '0' descarta el ítem
+    # ANTERIOR (Bronce, bbb) y retrocede a indice 1 para volver a pedirlo.
+    r_corregir = procesar_precio_paso_a_paso("0", items, r1["precios"], 2)
+    _cons("precio: '0' descarta el material anterior y retrocede",
+          r_corregir["tipo"] == "corregir" and r_corregir["indice"] == 1
+          and "bbb" not in r_corregir["precios"]
+          and "aaa" in r_corregir["precios"]
+          and "Bronce" in r_corregir["texto"])
+    # El último ítem (aaa) se conserva; solo se pierde el anterior (bbb).
+    _cons("precio: solo se descarta el anterior, el resto se conserva",
+          r_corregir["precios"].get("aaa") == 3500.0
+          and len(r_corregir["precios"]) == 1)
+
+    # '0' sin ítem anterior -> inválido (primer precio).
+    r_inv = procesar_precio_paso_a_paso("0", items, {}, 0)
+    _cons("precio: '0' sin ítem anterior es inválido",
+          r_inv["tipo"] == "invalido" and r_inv["indice"] == 0)
+
+    # Resumen final enumerado 1..N con instrucciones.
+    precios = {"aaa": 3500.0, "bbb": 16700.0, "ccc": 12000.0}
+    resumen = formatear_resumen_precios(items, precios)
+    _cons("resumen: enumera 1..N", "1. Cobre" in resumen and "2. Bronce" in resumen
+          and "3. Carter" in resumen)
+    _cons("resumen: muestra precio por kg de cada ítem",
+          "3,500.00 /kg" in resumen and "16,700.00 /kg" in resumen)
+    _cons("resumen: instrucciones OK/SI, edición y cancelar",
+          "*OK* o *SI*" in resumen and "*2 16700*" in resumen
+          and "*0* o *CANCELAR*" in resumen)
+
+    # Edición en el resumen: '2 16700' -> corrije el ítem 2 (Bronce) a 16700.
+    edit = parsear_edicion_precio("2 16700")
+    _cons("edicion: '2 16700' -> (2, 16700.0)", edit == (2, 16700.0))
+    _cons("edicion: textos no válidos -> None",
+          parsear_edicion_precio("abc") is None
+          and parsear_edicion_precio("2") is None
+          and parsear_edicion_precio("0 500") is None)
+    _cons("edicion: con coma decimal (coma = decimal, convención del sistema)",
+          parsear_edicion_precio("2 16,50") == (2, 16.5))
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -761,6 +840,7 @@ def main():
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()
     test_grafico_otros_max_10()
+    test_captura_precios_correccion_y_edicion()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1
