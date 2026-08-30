@@ -27,6 +27,7 @@ from services.inventario_service import (
     construir_lista_texto_whatsapp, construir_seccion_lista_interactiva,
     borrador_para_nueva_lista, es_lista_materiales, resolver_entrada_material,
     formatear_resumen_precios, parsear_edicion_precio, procesar_precio_paso_a_paso,
+    parsear_bloque_persona,
 )
 from services.currency_service import obtener_tasa_dolar
 
@@ -553,6 +554,129 @@ async def iniciar_aprobacion_orden_salida(telefono: str, usuario_id: int,
         f"Órdenes de Salida pendientes de valoración:\n\n{lista}\n\nSelecciona la que deseas aprobar:",
         [(o["numero"], o["numero"]) for o in ordenes[:3]],
     )
+
+
+async def iniciar_creacion(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
+    """Menú principal del módulo unificado de creación:
+    1. Cliente | 2. Conductor | 3. Producto/Material."""
+    contexto["accion_pendiente"] = {"tipo": "crear_menu"}
+    await guardar_contexto(usuario_id, contexto)
+    await enviar_botones_whatsapp(
+        telefono,
+        "¿Qué deseas crear?",
+        [("crear_cliente", "1. Cliente"), ("crear_conductor", "2. Conductor"),
+         ("crear_material", "3. Producto / Material")],
+    )
+
+
+def _formatear_ficha_cliente(p: Dict[str, Any]) -> str:
+    return (
+        f"👤 *Cliente:* {p.get('nombre','')}\n"
+        f"🪪 ID: {p.get('identificacion','')}\n"
+        f"📱 Tel: {p.get('telefono','')}\n"
+        f"📍 Dirección: {p.get('direccion','')}"
+    ) if p.get("nombre") else ""
+
+def _formatear_ficha_conductor(p: Dict[str, Any]) -> str:
+    return (
+        f"🚚 *Conductor:* {p.get('nombre','')}\n"
+        f"🪪 ID: {p.get('identificacion','')}\n"
+        f"🚗 Placa: {p.get('placa','')}\n"
+        f"📱 Tel: {p.get('telefono','')}"
+    ) if p.get("nombre") else ""
+
+async def capturar_bloque_cliente(telefono: str, usuario_id: int, bodega_id: int,
+                                  contexto: Dict[str, Any], texto: str) -> None:
+    """En bloque (Cliente): parsea el mensaje; si está completo y no existe, lo crea.
+    Si falta nombre/identificación/teléfono/dirección, pasa a paso a paso SOLO lo faltante."""
+    p = parsear_bloque_persona(texto)
+    faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not p.get(c)]
+    exist = await asyncio.to_thread(inventario.buscar_cliente_existente,
+                                    identificacion=p.get("identificacion") or None,
+                                    telefono=p.get("telefono") or None)
+    if exist:
+        await enviar_mensaje_whatsapp(
+            telefono,
+            f"El cliente ya se encuentra registrado.\n{_formatear_ficha_cliente(exist)}")
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        return
+    if faltan:
+        contexto["accion_pendiente"] = {"tipo": "crear_cliente_paso", "datos": dict(p)}
+        contexto["campo_esperado"] = "cliente_" + faltan[0].replace("identificacion", "documento")
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, f"Faltan datos del cliente: {', '.join(faltan)}.\n¿{_pregunta_campo_cliente(faltan[0])}")
+        return
+    try:
+        nuevo = await asyncio.to_thread(inventario.registrar_cliente, **p)
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, f"✅ Cliente registrado:\n{_formatear_ficha_cliente(nuevo)}")
+    except ValueError as e:
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, str(e))
+
+
+def _pregunta_campo_cliente(campo: str) -> str:
+    return {
+        "nombre": "Nombre completo del cliente:",
+        "identificacion": "Identificación (CC/NIT):",
+        "telefono": "Teléfono / celular:",
+        "direccion": "Dirección:",
+    }.get(campo, f"{campo}:")
+
+async def capturar_bloque_conductor(telefono: str, usuario_id: int, bodega_id: int,
+                                    contexto: Dict[str, Any], texto: str) -> None:
+    """En bloque (Conductor): parsea; si falta placa u otro dato, pasa a paso a paso."""
+    p = parsear_bloque_persona(texto)
+    exist = await asyncio.to_thread(inventario.buscar_conductor_existente,
+                                    identificacion=p.get("identificacion") or None,
+                                    placa=p.get("placa") or None)
+    if exist:
+        await enviar_mensaje_whatsapp(telefono, f"El conductor ya se encuentra registrado.\n{_formatear_ficha_conductor(exist)}")
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        return
+    faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not p.get(c)]
+    if faltan:
+        contexto["accion_pendiente"] = {"tipo": "crear_conductor_paso", "datos": dict(p)}
+        contexto["campo_esperado"] = "conductor_" + faltan[0]
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, f"Faltan datos del conductor: {', '.join(faltan)}.\n¿{_pregunta_campo_conductor(faltan[0])}")
+        return
+    try:
+        nuevo = await asyncio.to_thread(inventario.registrar_conductor, **p)
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, f"✅ Conductor registrado:\n{_formatear_ficha_conductor(nuevo)}")
+    except ValueError as e:
+        contexto["accion_pendiente"] = {}
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, str(e))
+
+
+def _pregunta_campo_conductor(campo: str) -> str:
+    return {
+        "nombre": "Nombre completo del conductor:",
+        "identificacion": "Identificación (CC/NIT):",
+        "placa": "Placa del vehículo:",
+        "telefono": "Teléfono / celular:",
+    }.get(campo, f"{campo}:")
+
+async def iniciar_creacion_material(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
+    """Flujo paso a paso de Producto/Material: pide nombre y tipo."""
+    contexto["accion_pendiente"] = {"tipo": "crear_material_paso", "datos": {}}
+    contexto["campo_esperado"] = "material_nombre"
+    await guardar_contexto(usuario_id, contexto)
+    await enviar_mensaje_whatsapp(telefono, "Nombre del material:")
+    await enviar_botones_whatsapp(
+        telefono, "¿Es comercializable?",
+        [("si", "✅ Sí"), ("no", "❌ No")],
+    )
+    # Nota: el flujo del material pregunta nombre primero (campo_esperado =
+    # "material_nombre") y luego el tipo comercializable; la inserción se hace
+    # en el estado "crear_material_paso" del dispatcher.
 
 
 async def inferir_datos_ia(usuario: Dict[str, Any], bodega_id: int, fecha_mensaje: str,
@@ -1658,6 +1782,127 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     )
                     respuesta_texto = formatear_movimientos_material(resultado)
                     contexto["accion_pendiente"] = {}
+            elif accion["tipo"] == "crear_menu":
+                # Menú unificado de creación: 1 Cliente | 2 Conductor | 3 Material.
+                eleccion = texto.strip().lower()
+                if eleccion in {"1", "cliente", "crear_cliente"}:
+                    contexto["accion_pendiente"] = {"tipo": "crear_cliente_bloque", "datos": {}}
+                    await guardar_contexto(usuario_id, contexto)
+                    await enviar_mensaje_whatsapp(
+                        telefono,
+                        "Envíame los datos del cliente (nombre, CC/NIT, celular, dirección).\n"
+                        "Ejemplo:\n"
+                        "Juan Pérez\nCC 1020304050\nCel 3001234567\nCalle 10 #5-20\n\n"
+                        "O escribe *cancelar* para salir.",
+                    )
+                    return
+                elif eleccion in {"2", "conductor", "crear_conductor"}:
+                    contexto["accion_pendiente"] = {"tipo": "crear_conductor_bloque", "datos": {}}
+                    await guardar_contexto(usuario_id, contexto)
+                    await enviar_mensaje_whatsapp(
+                        telefono,
+                        "Envíame los datos del conductor (nombre, ID, placa, celular).\n"
+                        "Ejemplo:\n"
+                        "Pedro Gómez\nCC 1098765432\nPlaca ABC123\nCel 3112345678\n\n"
+                        "O escribe *cancelar* para salir.",
+                    )
+                    return
+                elif eleccion in {"3", "material", "producto", "producto / material", "crear_material"}:
+                    await iniciar_creacion_material(telefono, usuario_id, contexto)
+                    return
+                else:
+                    respuesta_texto = "Opción inválida. Escribe 1 (Cliente), 2 (Conductor) o 3 (Producto/Material)."
+            elif accion["tipo"] == "crear_cliente_bloque":
+                # Entrada en BLOQUE de cliente: se parsea y se procesa.
+                await capturar_bloque_cliente(telefono, usuario_id, bodega_id, contexto, texto)
+                return
+            elif accion["tipo"] == "crear_conductor_bloque":
+                # Entrada en BLOQUE de conductor: se parsea y se procesa.
+                await capturar_bloque_conductor(telefono, usuario_id, bodega_id, contexto, texto)
+                return
+            elif accion["tipo"] == "crear_cliente_paso":
+                # Paso a paso de Cliente: se completa el dato faltante del bloque.
+                datos = dict(accion.get("datos") or {})
+                faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not datos.get(c)]
+                campo = faltan[0] if faltan else None
+                if campo == "nombre":
+                    datos["nombre"] = texto
+                elif campo == "identificacion":
+                    datos["identificacion"] = normalizar_digitos(texto)
+                elif campo == "telefono":
+                    datos["telefono"] = texto.strip()
+                elif campo == "direccion":
+                    datos["direccion"] = texto.strip()
+                faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not datos.get(c)]
+                if faltan:
+                    accion["datos"] = datos
+                    respuesta_texto = f"Faltan datos del cliente: {', '.join(faltan)}.\n¿{_pregunta_campo_cliente(faltan[0])}"
+                else:
+                    try:
+                        nuevo = await asyncio.to_thread(inventario.registrar_cliente, **datos)
+                        contexto["accion_pendiente"] = {}
+                        respuesta_texto = f"✅ Cliente registrado:\n{_formatear_ficha_cliente(nuevo)}"
+                    except Exception as e:
+                        contexto["accion_pendiente"] = {}
+                        respuesta_texto = f"⚠️ {e}"
+            elif accion["tipo"] == "crear_conductor_paso":
+                # Paso a paso de Conductor: se completa el dato faltante.
+                datos = dict(accion.get("datos") or {})
+                faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
+                campo = faltan[0] if faltan else None
+                if campo == "nombre":
+                    datos["nombre"] = texto
+                elif campo == "identificacion":
+                    datos["identificacion"] = normalizar_digitos(texto)
+                elif campo == "placa":
+                    datos["placa"] = texto.strip().upper()
+                elif campo == "telefono":
+                    datos["telefono"] = texto.strip()
+                faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
+                if faltan:
+                    accion["datos"] = datos
+                    respuesta_texto = f"Faltan datos del conductor: {', '.join(faltan)}.\n¿{_pregunta_campo_conductor(faltan[0])}"
+                else:
+                    try:
+                        nuevo = await asyncio.to_thread(inventario.registrar_conductor, **datos)
+                        contexto["accion_pendiente"] = {}
+                        respuesta_texto = f"✅ Conductor registrado:\n{_formatear_ficha_conductor(nuevo)}"
+                    except Exception as e:
+                        contexto["accion_pendiente"] = {}
+                        respuesta_texto = f"⚠️ {e}"
+            elif accion["tipo"] == "crear_material_paso":
+                # Paso a paso de Producto/Material: nombre -> tipo -> comercializable -> confirmar.
+                datos = dict(accion.get("datos") or {})
+                if not datos.get("nombre"):
+                    datos["nombre"] = texto
+                    accion["datos"] = datos
+                    respuesta_texto = ("Tipo del material (BRUTO/SEMILIMPIO/LIMPIO/MERMA):\n"
+                                       "1. BRUTO  2. SEMILIMPIO  3. LIMPIO  4. MERMA")
+                elif not datos.get("tipo_material"):
+                    tipo_map = {"1": "BRUTO", "2": "SEMILIMPIO", "3": "LIMPIO", "4": "MERMA"}
+                    datos["tipo_material"] = tipo_map.get(texto.strip(), texto.strip().upper())
+                    accion["datos"] = datos
+                    respuesta_texto = "¿El material es comercializable? (si/no)"
+                elif "es_comercializable" not in datos:
+                    datos["es_comercializable"] = texto.strip().lower() in {"si", "sí", "yes", "1", "true"}
+                    accion["datos"] = datos
+                    respuesta_texto = (f"Confirma la creación del material:\n"
+                                       f"• Nombre: {datos['nombre']}\n"
+                                       f"• Tipo: {datos['tipo_material']}\n"
+                                       f"• Comercializable: {'Sí' if datos['es_comercializable'] else 'No'}\n\n"
+                                       f"Responde *SI* para guardar o *NO* para cancelar.")
+                else:
+                    if texto.strip().lower() in {"si", "sí", "s", "yes", "confirmar", "ok"}:
+                        try:
+                            nuevo = await asyncio.to_thread(inventario.registrar_material, **datos)
+                            contexto["accion_pendiente"] = {}
+                            respuesta_texto = f"✅ Material '{nuevo['nombre']}' registrado y catálogo actualizado."
+                        except Exception as e:
+                            contexto["accion_pendiente"] = {}
+                            respuesta_texto = f"⚠️ {e}"
+                    else:
+                        contexto["accion_pendiente"] = {}
+                        respuesta_texto = "Creación del material cancelada."
         except Exception as exc:
             contexto["accion_pendiente"] = {}
             respuesta_texto = f"No pude completar la acción: {exc}. Se canceló, intenta de nuevo."
@@ -1690,6 +1935,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
     if texto_normalizado in TRIGGERS_ORDENES_SALIDA:
         await iniciar_aprobacion_orden_salida(telefono, usuario_id, bodega_id, contexto)
+        return
+    # Módulo unificado de creación: Cliente / Conductor / Producto-Material.
+    if texto_normalizado in {"crear", "nuevo registro", "crear registro", "registrar", "crear nuevo"}:
+        context = usuario.get("contexto_operacion") or {}
+        context["codigo_crear"] = True
+        # Sin borrador previo ni intento de selección: va directo al menú.
+        await iniciar_creacion(telefono, usuario_id, context)
         return
     if texto.lower() in {"ver grafico", "ver gráfico", "reporte visual"}:
         url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)

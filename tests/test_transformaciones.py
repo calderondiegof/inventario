@@ -823,6 +823,79 @@ def test_captura_precios_correccion_y_edicion():
           parsear_edicion_precio("2 16,50") == (2, 16.5))
 
 
+# ---------------------------------------------------------------------------
+# Módulo Crear: parsing en bloque (Cliente/Conductor) y creación en BD
+# ---------------------------------------------------------------------------
+def test_crear_cliente_conductor_material():
+    """Módulo unificado de creación:
+    - parsear_bloque_persona extrae los campos de un mensaje en bloque
+      (nomenclaturas de Colombia y Argentina, placas, teléfonos con '+').
+    - registrar_cliente / registrar_conductor insertan y rechazan duplicados.
+    - registrar_material inserta y RECARGA el catálogo en memoria.
+    """
+    from services.inventario_service import parsear_bloque_persona
+
+    # 1) Parsing de bloque con formato Colombia.
+    bloque_co = "Juan Perez\nCC 1.023.456.789\ncel 3001234567\nCra 45 #12-30"
+    p = parsear_bloque_persona(bloque_co)
+    _cons("Crear: bloque CO -> nombre", p["nombre"] == "Juan Perez")
+    _cons("Crear: bloque CO -> identificacion sin separadores (1023456789)",
+          p["identificacion"] == "1023456789")
+    _cons("Crear: bloque CO -> telefono", p["telefono"] == "3001234567")
+    _cons("Crear: bloque CO -> direccion con nomenclatura", "Cra 45" in p["direccion"])
+
+    # 2) Parsing de bloque con formato Argentina (DNI + placa + tel. con +).
+    bloque_ar = ("Maria Gomez\nDNI 27894567\nAvenida Siempre Viva 742\n"
+                 "AAA123\nCel: +54 9 11 1234-5678")
+    p2 = parsear_bloque_persona(bloque_ar)
+    _cons("Crear: bloque AR -> DNI (27894567)", p2["identificacion"] == "27894567")
+    _cons("Crear: bloque AR -> placa AAA123", p2["placa"] == "AAA123")
+    _cons("Crear: bloque AR -> telefono con + normalizado (+5491112345678)",
+          p2["telefono"] == "+5491112345678")
+    _cons("Crear: bloque AR -> direccion Av.", "Avenida" in p2["direccion"])
+
+    # 3) Creación real contra el fake de Supabase.
+    fake, inv = _generar()
+    cli = inv.registrar_cliente(nombre=p["nombre"], identificacion=p["identificacion"],
+                                telefono=p["telefono"], direccion=p["direccion"])
+    _cons("Crear: cliente insertado con id", bool(cli and cli.get("id")))
+    cond = inv.registrar_conductor(nombre=p2["nombre"], identificacion=p2["identificacion"],
+                                   placa=p2["placa"], telefono=p2["telefono"])
+    _cons("Crear: conductor insertado con placa", bool(cond and cond.get("placa") == "AAA123"))
+
+    # 4) Duplicados -> ValueError con mensaje amigable.
+    try:
+        inv.registrar_cliente(nombre="Otro", identificacion="1023456789")
+        _cons("Crear: cliente duplicado rechazado", False)
+    except ValueError as e:
+        _cons("Crear: cliente duplicado rechazado",
+              "Ya existe un registro con la identificación 1023456789" in str(e))
+    try:
+        inv.registrar_conductor(nombre="Otro", identificacion="27894567")
+        _cons("Crear: conductor duplicado rechazado", False)
+    except ValueError:
+        _cons("Crear: conductor duplicado rechazado", True)
+
+    # 5) Material nuevo: se inserta y el catálogo en memoria se recarga.
+    mat = inv.registrar_material(nombre="Bronce", tipo_material="LIMPIO",
+                                 es_comercializable=True)
+    _cons("Crear: material insertado", bool(mat and mat.get("id")))
+    _cons("Crear: material disponible en catálogo en memoria",
+          "bronce" in inv.catalogo_materiales)
+    try:
+        inv.registrar_material(nombre="Bronce")
+        _cons("Crear: material duplicado rechazado", False)
+    except ValueError:
+        _cons("Crear: material duplicado rechazado", True)
+
+    # 6) Falta de campo obligatorio (sin nombre) -> ValueError.
+    try:
+        inv.registrar_cliente(nombre="", identificacion="999")
+        _cons("Crear: cliente sin nombre rechazado", False)
+    except ValueError:
+        _cons("Crear: cliente sin nombre rechazado", True)
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -841,6 +914,7 @@ def main():
     test_reporte_texto_alfabetico()
     test_grafico_otros_max_10()
     test_captura_precios_correccion_y_edicion()
+    test_crear_cliente_conductor_material()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1

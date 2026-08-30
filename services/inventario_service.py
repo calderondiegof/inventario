@@ -108,6 +108,117 @@ def _parsear_numero_moneda(texto: str) -> Optional[float]:
         return None
 
 
+# -----------------------------------------------------------------------------
+# Parser de bloques para el módulo unificado de creación (Cliente / Conductor).
+# Procesa un mensaje de varias líneas o texto continuo y extrae los campos por
+# patrones flexibles (nomenclaturas de Colombia y Argentina).
+# -----------------------------------------------------------------------------
+_PATRON_IDENTIFICACION = re.compile(
+    r"\b(CC|NIT|DNI|CUIT|NID|ID|CEDULA|CEDULA DE CIUDADANIA|CED)\s*[:\-]?\s*(\d[\d\s.\-]{4,})\b",
+    re.IGNORECASE,
+)
+_PATRON_TELEFONO = re.compile(
+    r"(?:\b(?:cel|celular|tel|telefono|tel\b|movil|móvil)\s*[:\-]?\s*(\+?\d[\d\s.\-]{7,})\b)"
+    r"|(?<!\d)(?:\+?\d[\d\s.\-]{9,})(?!\d)",
+    re.IGNORECASE,
+)
+_NOMENCLATURAS = r"\b(?:Calle|Cl|Cra|Carrera|Cr|Av|Avenida|Diagonal|Dg|Transversal|Tv|Autopista|Pasaje|Pje|Cll|Clle|Diag|Tvz|Via|Vía)\b"
+_PATRON_DIRECCION = re.compile(
+    rf"([^\n]*(?:{_NOMENCLATURAS})[^\n]*)", re.IGNORECASE,
+)
+_PATRON_PLACA = re.compile(
+    r"\b(?:[A-Za-z]{3}[\-]?\d{2,3}[\-]?[A-Za-z]{0,2})"
+    r"|(?:[A-Za-z]{2}\d{2,3}[A-Za-z]{2})\b",
+    re.IGNORECASE,
+)
+_PATRON_FECHA_DNI = re.compile(r"\b(\d{6,8})\b")  # DNI numérico sin etiqueta
+
+
+def _limpiar_digitos(texto: str) -> str:
+    return re.sub(r"\D", "", texto or "")
+
+
+def normalizar_digitos(texto: str) -> str:
+    """Extrae solo los dígitos de un texto (quita separadores, guiones, prefijos
+    de país en teléfonos, letras de placas no aplican aquí). Usado para
+    identificaciones y teléfonos en el paso a paso de creación."""
+    return _limpiar_digitos(texto)
+
+
+def parsear_bloque_persona(texto: str) -> Dict[str, str]:
+    """Extrae nombre, identificacion, telefono, direccion y placa (opcional)
+    de un mensaje en bloque para Cliente o Conductor.
+
+    - Nombre: primera línea no vacía (quitando prefijos de otros campos).
+    - identificacion: etiqueta CC/NIT/DNI/CUIT/ID/NID + números, o un DNI de 6-8
+      dígitos suelto; se ESTRIPA el prefijo y se dejan solo los dígitos.
+    - telefono: etiqueta cel/celular/tel/telefono + números, o secuencia de 10+
+      dígitos (se conserva el '+ ' si existe).
+    - direccion: líneas que contienen nomenclatura de Calle/Cra/Av/Dg/Tv/...
+    - placa: patrón de placa vehicular (solo relevante para Conductor).
+    """
+    lineas = [l.strip().lstrip("*•-").strip() for l in _normalizar_lineas(texto)]
+    nombre_candidatos: List[str] = []
+    identificacion = telefono = direccion = placa = ""
+
+    for linea in lineas:
+        placa_m = _PATRON_PLACA.search(linea)
+        if placa_m:
+            placa = placa_m.group(0).strip().upper().replace(" ", "")
+        ident_m = _PATRON_IDENTIFICACION.search(linea)
+        if ident_m:
+            identificacion = _limpiar_digitos(ident_m.group(2))
+        tel_m = _PATRON_TELEFONO.search(linea)
+        if tel_m:
+            telefono = tel_m.group(0).strip().lstrip("cel: celular: tel: telefono: movil: mobile: ").strip()
+            telefono = re.sub(r"[\s.\-]", "", telefono)
+            for pref in ("cel:", "celular:", "tel:", "telefono:", "movil:", "móvil:", "cel", "celular", "tel", "telefono", "movil", "móvil"):
+                if telefono.lower().startswith(pref):
+                    telefono = telefono[len(pref):].strip()
+                    break
+        if _PATRON_DIRECCION.search(linea):
+            direccion = linea
+            continue
+        # Si la línea no es identificable como campo técnico, puede ser nombre.
+        if not (ident_m or tel_m or placa_m):
+            nombre_candidatos.append(linea)
+
+    # Nombre: primera línea "limpia" (línea principal del bloque).
+    nombre = ""
+    for cand in nombre_candidatos:
+        if _tiene_nomenclatura(cand):
+            continue
+        nombre = cand
+        break
+
+    # Si no se reconoció identificación por etiqueta y no aparece ya en otra
+    # línea, intentamos un DNI numérico suelto.
+    if not identificacion:
+        for cand in nombre_candidatos:
+            dni = _PATRON_FECHA_DNI.search(cand)
+            if dni and len(_limpiar_digitos(dni.group(0))) == len(dni.group(0)) \
+               and len(_limpiar_digitos(dni.group(0))) >= 6:
+                identificacion = dni.group(0)
+                nombre = nombre.replace(dni.group(0), "").strip()
+                break
+
+    return {
+        "nombre": nombre.strip(),
+        "identificacion": identificacion,
+        "telefono": telefono,
+        "direccion": direccion,
+        "placa": placa,
+    }
+
+
+def _normalizar_lineas(texto: str) -> List[str]:
+    return [l for l in re.split(r"[\n;]+", texto or "") if l.strip()]
+
+
+def _tiene_nomenclatura(texto: str) -> bool:
+    return bool(_PATRON_DIRECCION.search(texto))
+
+
 def formatear_resumen_precios(items: Iterable[Dict[str, Any]],
                               precios: Dict[str, float]) -> str:
     """Construye el resumen FINAL enumerado (1..N) del flujo de precios de una
@@ -770,6 +881,106 @@ class InventarioServiceConValidacion:
         }).execute().data
         if not nuevo:
             raise ValueError("No se pudo registrar el conductor.")
+        return nuevo[0]
+
+    def buscar_cliente_existente(self, *, identificacion: Optional[str] = None,
+                                 telefono: Optional[str] = None,
+                                 nombre: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Solo búsqueda (sin crear): devuelve el cliente que coincida por
+        identificacion, luego telefono y luego nombre (en ese orden)."""
+        if identificacion:
+            filas = self.supabase.table("clientes").select("*").eq("identificacion", identificacion).execute().data
+            if filas:
+                return filas[0]
+        if telefono:
+            filas = self.supabase.table("clientes").select("*").eq("telefono", telefono).execute().data
+            if filas:
+                return filas[0]
+        if nombre:
+            filas = self.supabase.table("clientes").select("*").ilike("nombre", (nombre or "").strip()).execute().data
+            if filas:
+                return filas[0]
+        return None
+
+    def buscar_conductor_existente(self, *, identificacion: Optional[str] = None,
+                                    placa: Optional[str] = None,
+                                    nombre: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Solo búsqueda (sin crear): devuelve el conductor que coincida por
+        identificacion, placa o nombre (en ese orden)."""
+        if identificacion:
+            filas = self.supabase.table("conductores").select("*").eq("identificacion", identificacion).execute().data
+            if filas:
+                return filas[0]
+        if placa:
+            filas = self.supabase.table("conductores").select("*").ilike("placa", f"%{placa}%").execute().data
+            if filas:
+                return filas[0]
+        if nombre:
+            filas = self.supabase.table("conductores").select("*").ilike("nombre", (nombre or "").strip()).execute().data
+            if filas:
+                return filas[0]
+        return None
+
+    def registrar_cliente(self, *, nombre: str, identificacion: Optional[str] = None,
+                          telefono: Optional[str] = None,
+                          direccion: Optional[str] = None) -> Dict[str, Any]:
+        """Crea un cliente (tabla 'clientes'). Lanza ValueError si ya existe
+        uno con esa identificación."""
+        nombre = (nombre or "").strip()
+        if not nombre:
+            raise ValueError("El cliente debe tener un nombre.")
+        existente = self.supabase.table("clientes").select("*").eq("identificacion", identificacion).execute().data
+        if existente:
+            raise ValueError(f"Ya existe un registro con la identificación {identificacion}.")
+        nuevo = self.supabase.table("clientes").insert({
+            "nombre": nombre, "identificacion": identificacion,
+            "telefono": telefono, "direccion": direccion,
+        }).execute().data
+        if not nuevo:
+            raise ValueError("No se pudo registrar el cliente.")
+        return nuevo[0]
+
+    def registrar_conductor(self, *, nombre: str, identificacion: Optional[str] = None,
+                             placa: Optional[str] = None,
+                             telefono: Optional[str] = None) -> Dict[str, Any]:
+        """Crea un conductor (tabla 'conductores'). Lanza ValueError si ya existe
+        uno con esa identificación."""
+        nombre = (nombre or "").strip()
+        if not nombre:
+            raise ValueError("El conductor debe tener un nombre.")
+        if identificacion:
+            existente = self.supabase.table("conductores").select("*").eq("identificacion", identificacion).execute().data
+            if existente:
+                raise ValueError(f"Ya existe un registro con la identificación {identificacion}.")
+        nuevo = self.supabase.table("conductores").insert({
+            "nombre": nombre, "identificacion": identificacion,
+            "placa": placa, "telefono": telefono,
+        }).execute().data
+        if not nuevo:
+            raise ValueError("No se pudo registrar el conductor.")
+        return nuevo[0]
+
+    def registrar_material(self, *, nombre: str, tipo_material: str = "LIMPIO",
+                          es_comercializable: bool = True) -> Dict[str, Any]:
+        """Crea un material (tabla 'materiales'), recarga el catálogo en memoria
+        (recargar_catalogos) para no reiniciar la app, y devuelve la fila.
+        Lanza ValueError si ya existe un material con ese nombre."""
+        nombre = (nombre or "").strip()
+        if not nombre:
+            raise ValueError("El material debe tener un nombre.")
+        tipo = normalizar(tipo_material or "LIMPIO").upper()
+        if tipo == "DESPERDICIO":
+            tipo = "MERMA"
+        existente = self.supabase.table("materiales").select("*").eq("nombre", nombre).execute().data
+        if existente:
+            raise ValueError(f"Ya existe un material con el nombre '{nombre}'.")
+        nuevo = self.supabase.table("materiales").insert({
+            "nombre": nombre, "tipo_material": tipo, "es_comercializable": bool(es_comercializable),
+        }).execute().data
+        if not nuevo:
+            raise ValueError("No se pudo registrar el material.")
+        # Actualizar el catálogo en memoria sin reiniciar la app.
+        self.recargar_catalogos()
         return nuevo[0]
 
     def _movimiento(self, *, usuario_id: int, bodega_id: int, material_id: int,
