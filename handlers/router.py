@@ -537,7 +537,20 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     
     
     # ── Comando PDF ────────────────────────────────────────────────────────────
-    if texto_normalizado == "remisiones" or texto_normalizado.startswith("pdf"):
+    if (
+        texto_normalizado == "remisiones"
+        or texto_normalizado.startswith("pdf")
+        or texto_normalizado.startswith("rem_")
+        or texto_normalizado.startswith("remision")
+    ):
+        if texto_normalizado.startswith(("rem_", "remision")):
+            if texto_normalizado.startswith("rem_"):
+                num = texto_normalizado[4:].strip()
+            else:
+                num = texto_normalizado[len("remision"):].strip()
+            if num and num[0].isdigit():
+                texto = f"pdf REM_{num}"
+
         resp = await pdf_handler.manejar_comando_pdf(
             texto=texto, telefono=telefono, usuario_id=usuario_id,
         )
