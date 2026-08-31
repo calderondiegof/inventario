@@ -147,6 +147,6 @@ async def _listar_remisiones(telefono: str, usuario_id: str) -> str:
         header_title="Remisiones", header_subtitle="Ultimas remisiones",
         body_text="Selecciona una remision para reimprimir:",
         boton_principal="Ver remisiones",
-        opciones=[{"title": titulo, "description": desc} for _, titulo, desc in filas],
+        opciones=[{"id": f"pdf {rem_id}", "title": titulo, "description": desc} for rem_id, titulo, desc in filas],
     )
     return ""
