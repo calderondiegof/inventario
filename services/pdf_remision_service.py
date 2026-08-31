@@ -108,23 +108,30 @@ class PdfRemisionService:
                            fecha_creacion=fila.get("fecha_creacion"))
 
     def listar_remisiones_con_pdf(self, limite: int = 10) -> List[RemisionPdf]:
+        """Lista las ultimas remisiones para reimprimir dinamicamente.
+
+        Ya no se filtra por pdf_url porque el PDF se genera on-the-fly
+        desde los datos de la remision (movimientos_inventario).
+        """
         if not self._supabase or limite <= 0: return []
         try:
             res = (self._supabase.table("remisiones")
-                .select("numero_remision,pdf_url,cliente,fecha_creacion")
-                .neq("pdf_url", "null")
-                .order("fecha_creacion", desc=True)
-                .order("numero_remision", desc=True).limit(limite).execute())
+                .select("numero,cliente_id,fecha_operacion,estado")
+                .order("fecha_operacion", desc=True)
+                .order("numero", desc=True).limit(limite).execute())
         except Exception as exc:
             logger.error("Error listando: %s", exc); return []
         out: List[RemisionPdf] = []
         for fila in (getattr(res, "data", None) or []):
-            url = (fila.get("pdf_url") or "").strip()
-            if url:
-                out.append(RemisionPdf(numero_remision=fila.get("numero_remision") or "",
-                                       pdf_url=url,
-                                       cliente=fila.get("cliente") or "",
-                                       fecha_creacion=fila.get("fecha_creacion")))
+            numero = (fila.get("numero") or "").strip()
+            if not numero:
+                continue
+            cliente_id = fila.get("cliente_id")
+            cliente_str = f"Cliente #{cliente_id}" if cliente_id else "Sin cliente"
+            out.append(RemisionPdf(numero_remision=numero,
+                                   pdf_url="reimprimible",
+                                   cliente=cliente_str,
+                                   fecha_creacion=fila.get("fecha_operacion")))
         return out
 
     def descargar_pdf(self, remision: RemisionPdf) -> Path:
