@@ -925,4 +925,15 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
         if isinstance(contexto.get("borrador_pendiente"), dict):
             contexto["borrador_pendiente"]["items"] = []
             await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, f"No registré la operación: {exc}")
+        msg_error = str(exc)
+        if "stock insuficiente" in msg_error.lower():
+            await enviar_mensaje_whatsapp(
+                telefono,
+                f"⚠️ No se pudo registrar la operación.\n"
+                f"{msg_error}\n\n"
+                "No necesitas escribir 'cancelar': la operación se canceló automáticamente. "
+                "Revisa el saldo con *ver inventario* y reenvía el movimiento con cantidades "
+                "corregidas (por ejemplo: *venta cobre 1 arreglo carter 1*).",
+            )
+        else:
+            await enviar_mensaje_whatsapp(telefono, f"No registré la operación: {msg_error}")
