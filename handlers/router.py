@@ -552,8 +552,21 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             await enviar_mensaje_whatsapp(telefono, resp)
         return
 
-await remisiones_handler.procesar_wizard_registro(
-        message=message, texto=texto, texto_normalizado=texto_normalizado,
-        telefono=telefono, usuario=usuario, usuario_id=usuario_id,
-        bodega_id=bodega_id, contexto=contexto,
-    )
+    # ── Wizard de modo de impresion PDF ──────────────────────────────────────
+    if contexto.get("tipo") == "esperando_modo_impresion_pdf":
+        respuesta = await pdf_handler.manejar_respuesta_modo_impresion(
+            telefono, texto_normalizado, usuario_id
+        )
+        if respuesta:
+            await enviar_mensaje_whatsapp(telefono, respuesta)
+        return
+    
+    # ── Wizard de registro de despacho ───────────────────────────────────────
+    elif contexto.get("tipo") == "registrar_despacho":
+        respuesta = await remisiones_handler.procesar_wizard_registro(
+            texto_normalizado, telefono, contexto, supabase
+        )
+        return respuesta
+    
+    # Si llegamos aquí y no hay contexto activo, pasar al agente IA
+    return "No pude interpretar el mensaje. Inténtalo nuevamente."
