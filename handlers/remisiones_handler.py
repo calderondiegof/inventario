@@ -854,7 +854,7 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                 cliente_conductor=datos.get("cliente_conductor"),
                 cliente_conductor_id=datos.get("cliente_conductor_id"),
                 cliente_placa=datos.get("cliente_placa"),
-                cliente_conductor_telefono=datos.get("cliente_conductor_celular"), # <--- Asegúrate de usar esta clave aquí
+                cliente_conductor_telefono=datos.get("cliente_conductor_celular"),
             )
 
             pdf_path = None
@@ -878,8 +878,6 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                     items=datos.get("items", []),
                     numero_remision=numero_orden,
                     bodega_id=bodega_id,
-                    # Flujo "Orden de Salida -> Remisión Aprobada": la venta nace
-                    # sin precios; el PDF es una Orden de Salida SIN valores.
                     estado=r.get("estado") or "ORDEN_SALIDA",
                 )
                 logger.info(f"📄 Orden de Salida generada: {pdf_path}")
@@ -905,19 +903,14 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                 logger.error(f"❌ Error generando Orden de Salida: {e}")
                 salida = f"✅ Venta registrada: {len(r['registros'])} material(es), fecha {fecha}.\n⚠️ No se pudo generar la Orden de Salida."
         else:
+            # Intención no reconocida o "OTRO": guardar borrador y preguntar
             contexto["borrador_pendiente"] = datos
+            contexto["campo_esperado"] = "tipo_movimiento"
             await guardar_contexto(usuario_id, contexto)
-            
-            menu_principal = [
-                ("1", "Ingresar Inventario"),
-                ("2", "Ver Inventario"),
-                ("3", "Anular/Corregir Rem")
-            ]
-            
             await enviar_botones_whatsapp(
-                destino=telefono,
-                texto=datos.get("respuesta_texto") or "¿Qué operación deseas registrar?",
-                opciones=menu_principal
+                telefono,
+                "No pude determinar el tipo de movimiento. Selecciona:",
+                [("entrada", "Entrada"), ("arreglo", "Seleccion Arreglo"), ("salida", "Salida")],
             )
             return MANEJADO
         contexto["borrador_pendiente"] = {}
