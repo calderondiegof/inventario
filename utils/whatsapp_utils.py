@@ -62,10 +62,10 @@ def construir_seccion_lista_interactiva(filas: Iterable, titulo_lista: str = "Ma
     rows = []
     for f in filas_list:
         if isinstance(f, dict):
-            rows.append({"id": f["id"], "title": f["title"], "description": f.get("description", "")})
+            rows.append({"id": f["id"], "title": f["title"][:24], "description": f.get("description", "")[:72]})
         else:
-            rows.append({"id": str(f[0]), "title": str(f[1]), "description": str(f[2]) if len(f) > 2 else ""})
-    return [{"title": titulo_lista, "rows": rows}]
+            rows.append({"id": str(f[0]), "title": str(f[1])[:24], "description": str(f[2])[:72] if len(f) > 2 else ""})
+    return [{"title": titulo_lista[:24], "rows": rows}]
 
 def parsear_edicion_precio(texto: str) -> Optional[Tuple[int, float]]:
     """Parsea el comando de edicion de precio: 'N VALOR'."""
