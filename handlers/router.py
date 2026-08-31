@@ -27,7 +27,8 @@ from reporte_grafico import generar_y_subir_grafico_stock
 from services.inventario_service import (
     construir_lista_texto_whatsapp, resolver_entrada_material,
 )
-from utils.parsers import _normalizar_texto, parsear_fecha_colombiana
+from utils.text_normalizer import normalizar as _normalizar_texto
+from utils.parsers import parsear_fecha_colombiana
 from utils.whatsapp_formatter import formatear_movimientos_material
 
 logger = logging.getLogger(__name__)

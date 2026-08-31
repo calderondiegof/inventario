@@ -9,7 +9,28 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
-from supabase import Client, create_client
+# Importante: si un test (u otro modulo) inyecta un stub en
+# `sys.modules['supabase']` antes de cargar este config, el import directo
+# desde el paquete top-level levantara `ImportError: cannot import name
+# 'create_client' from 'supabase' (unknown location)` porque el stub no es
+# un paquete real. Para evitar eso, lo sacamos de sys.modules y luego
+# importamos el paquete real instalado en site-packages.
+import sys as _sys
+if "supabase" in _sys.modules:
+    _supabase_mod = _sys.modules.get("supabase")
+    # Si el modulo en sys.modules es un stub (no tiene __file__ apuntando
+    # al paquete real), lo removemos para forzar la importacion del real.
+    if not getattr(_supabase_mod, "__file__", None) or not getattr(
+        _supabase_mod, "__path__", None
+    ):
+        _sys.modules.pop("supabase", None)
+
+try:
+    from supabase import create_client, Client
+except ImportError:
+    # Fallback: en versiones mas nuevas `Client` se importa desde
+    # `supabase._sync.client` directamente.
+    from supabase._sync.client import create_client, Client  # type: ignore
 
 from services.inventario_service import InventarioServiceConValidacion
 

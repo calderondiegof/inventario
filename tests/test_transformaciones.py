@@ -1046,6 +1046,55 @@ def test_normalizacion_y_validacion_cliente():
 
 
 
+def test_conductor_service_normalizacion_y_placas():
+    """Valida:
+    a) ConductorService modularizado y búsqueda insensible a tildes/mayúsculas.
+    b) Normalización y búsqueda flexible por placas y remolques.
+    c) Manejo de campos opcionales (dirección y remolque/tráiler).
+    """
+    from tests.test_transformaciones import FakeSupabase
+    from services.conductor_service import ConductorService, normalizar_placa
+    
+    fake = FakeSupabase()
+    cs = ConductorService(fake)
+    
+    # a) Normalización de placa
+    _cons("Normalización de placa con guiones/minúsculas", normalizar_placa("abc-123") == "ABC123")
+    _cons("Normalización de placa con espacios", normalizar_placa(" XYZ 789 ") == "XYZ789")
+    
+    # b) Registro con tráiler y búsqueda insensible a tildes y mayúsculas
+    cond1 = cs.registrar_conductor(
+        nombre_conductor="Hernán Darío Gómez",
+        id_conductor="10102020",
+        telefono_conductor="3119876543",
+        direccion_conductor="Cra 15 # 45-20",
+        placa_conductor="ABC-123",
+        placa_trailer_conductor="TR-999"
+    )
+    _cons("Conductor registrado con éxito", cond1["nombre"] == "Hernán Darío Gómez")
+    
+    # Búsqueda por nombre sin tildes y en minúsculas
+    busc_nombre = cs.buscar_conductor_existente(nombre="hernan dario gomez")
+    _cons("Búsqueda conductor insensible a tildes", busc_nombre is not None and busc_nombre["id"] == cond1["id"])
+    
+    # Búsqueda por placa (tolerante a formato)
+    busc_placa = cs.buscar_conductor_existente(placa="abc123")
+    _cons("Búsqueda conductor por placa normalizada", busc_placa is not None and busc_placa["id"] == cond1["id"])
+    
+    # Búsqueda por placa de tráiler
+    busc_trailer = cs.buscar_conductor_existente(placa="TR999")
+    _cons("Búsqueda conductor por placa de tráiler", busc_trailer is not None and busc_trailer["id"] == cond1["id"])
+    
+    # c) Campos opcionales (sin dirección ni tráiler)
+    cond2 = cs.registrar_conductor(
+        nombre_conductor="Pedro Pérez",
+        id_conductor="30304040",
+        telefono_conductor="3000000000",
+        placa_conductor="XYZ-789"
+    )
+    _cons("Conductor sin dirección ni trailer guarda None", cond2.get("direccion") is None and cond2.get("placa_trailer") is None)
+
+
 
 def main():
     test_regla1_revuelto()
@@ -1067,6 +1116,8 @@ def main():
     test_captura_precios_correccion_y_edicion()
     test_crear_cliente_conductor_material()
     test_atributos_explicitos_placas_y_direccion()
+    test_conductor_service_normalizacion_y_placas()
+
     test_direccion_opcional_conductor()
     test_normalizacion_y_validacion_cliente()
 

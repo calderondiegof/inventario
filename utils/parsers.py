@@ -1,4 +1,9 @@
-"""Utilidades de parsing de texto (cantidades, bloques de persona, fechas)."""
+"""Utilidades de parsing de texto (cantidades, bloques de persona, fechas).
+
+Este módulo existe como capa de orquestación que agrupa utilidades de
+parsing usadas por los handlers. Las funciones puras de bajo nivel viven
+en ``utils/text_normalizer.py`` y ``utils/number_parser.py``.
+"""
 import logging
 import re
 import unicodedata
@@ -6,7 +11,8 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import BOGOTA
-from services.inventario_service import normalizar, normalizar_digitos
+from utils.text_normalizer import normalizar, normalizar_digitos, _normalizar_texto
+from utils.number_parser import _parsear_numero
 
 logger = logging.getLogger(__name__)
 
@@ -138,43 +144,10 @@ def parsear_fecha_colombiana(texto: str) -> Optional[str]:
         return date(anio, mes, dia).isoformat()
     except ValueError:
         return None
-def _normalizar_texto(texto: str) -> str:
-    """Normaliza la entrada del usuario para comparaciones exactas:
-    trim + minúsculas + REMOCIÓN de acentos/diacríticos (NFD + descarte de
-    combining). Así 'órdenes', 'ÓRDENES' y 'ordenes' coinciden sin mantener
-    variantes duplicadas en los sets de triggers."""
-    t = unicodedata.normalize("NFD", (texto or ""))
-    t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    return t.strip().lower()
 
+# Alias de compatibilidad: 'normalizar_nombre' usado por tests antiguos.
+normalizar_nombre = normalizar
 
-def normalizar_nombre(nombre: str) -> str:
-    """Versión pública de `_normalizar_texto`: remueve tildes/acentos y
-    convierte a minúsculas para comparaciones insensibles a mayúsculas y
-    tildes. Así 'Juan Pérez' y 'juan perez' se consideran iguales."""
-    return _normalizar_texto(nombre)
-
-
-
-def _parsear_numero(texto: str) -> Optional[float]:
-    """Parsea un número escrito con formato español o inglés:
-    '4120,50' -> 4120.5 | '1.250.000' -> 1250000 | '1,250.50' -> 1250.5.
-    Devuelve None si no es un número válido."""
-    t = (texto or "").strip().replace(" ", "").replace("$", "")
-    if not t:
-        return None
-    if "," in t and "." in t:
-        # Ambos separadores: el último es el decimal.
-        if t.rfind(",") > t.rfind("."):
-            t = t.replace(".", "").replace(",", ".")
-        else:
-            t = t.replace(",", "")
-    elif "," in t:
-        t = t.replace(",", ".")
-    try:
-        return float(t)
-    except ValueError:
-        return None
 _PALABRAS_CLAVE_PROCESO = {"seleccion", "selección", "seleccionar", "seleccionando"}
 
 

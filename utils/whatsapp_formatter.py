@@ -1,9 +1,9 @@
-"""Formateo de mensajes de texto para la API de WhatsApp."""
-import logging
-from typing import Any, Dict, List, Optional
+"""Formateo de mensajes de texto para la API de WhatsApp.
 
-logger = logging.getLogger(__name__)
-
+Las funciones públicas se usan desde los handlers. La plantilla de selección
+vive en InventarioServiceConValidacion.construir_mensaje_seleccion.
+"""
+from typing import Any, Dict
 
 
 def formatear_movimientos_material(resultado: Dict[str, Any]) -> str:
@@ -46,28 +46,4 @@ def _formatear_ficha_conductor(p: Dict[str, Any]) -> str:
         f"{linea_trailer}{linea_direccion}\n"
         f"📱 Tel: {p.get('telefono','') or p.get('telefono_conductor','')}"
     ) if p.get("nombre") or p.get("nombre_conductor") else ""
-def construir_mensaje_seleccion(r: Dict[str, Any], fecha: str,
-                                omitidos: Optional[List[str]] = None) -> str:
-    """Plantilla ESTRICTA de la confirmación de selección por WhatsApp.
-
-    Función SÍNCRONA a propósito: no realiza ningún `await`, por lo que se
-    llama directamente en el dispatch de `procesar_un_mensaje`. (Si fuera
-    `async def`, un llamado sin `await` enviaría un objeto coroutine como
-    mensaje en vez del texto real.)
-
-    Formato base:
-      ✅ Selección registrada: {n} resultado(s), merma {merma:.2f} kg,
-      revuelto: -{total:.0f} kg, fecha {fecha}.
-
-    Si hay ítems que no pudieron registrarse (no encontrados en catálogo),
-    se añade la sección de alerta — los ítems omitidos JAMÁS se ignoran en
-    silencio."""
-    msg = (f"✅ Selección registrada: {len(r['registros']) - 1} resultado(s), "
-           f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:.0f} kg, "
-           f"fecha {fecha}.")
-    if omitidos:
-        detalle = "\n".join(f"- {o} kg (Material no encontrado en el catálogo)"
-                            for o in omitidos)
-        msg += ("\n\n⚠️ **Atención:** Los siguientes ítems no se pudieron "
-                f"registrar y fueron ignorados:\n{detalle}")
 

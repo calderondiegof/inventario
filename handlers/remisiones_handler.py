@@ -31,7 +31,6 @@ from utils.parsers import (
     parsear_campos_cliente_venta, parsear_fecha_colombiana,
     parsear_material_cantidad,
 )
-from utils.parsers import _parsear_numero, parsear_fecha_colombiana
 from utils.whatsapp_formatter import construir_mensaje_seleccion
 
 logger = logging.getLogger(__name__)

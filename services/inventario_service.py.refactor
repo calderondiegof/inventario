@@ -75,6 +75,13 @@ from utils.parsing_utils import (
 # ---------------------------------------------------------------------------
 
 
+
+# ---------------------------------------------------------------------------
+# NOTA DE MIGRACIÓN: Las definiciones de las funciones originales que vivían
+# en este módulo (construcción de listas de WhatsApp, parseo de números,
+# parsing de bloques de persona, sinónimos y frases, deduplicación por huella)
+# fueron extraídas a módulos ``utils/`` y ``services/enums.py|types.py``.
+# Se re-exportan arriba para preservar el contrato público.
 # ---------------------------------------------------------------------------
 
 # Constante de parsing usada por resolver_lista_materiales.

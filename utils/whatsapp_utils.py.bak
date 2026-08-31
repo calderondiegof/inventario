@@ -1,0 +1,324 @@
+"""Utilidades de formateo y parsing para mensajes de WhatsApp.
+
+Este módulo contiene funciones puras que traducen entre la representación
+interna de datos (materiales, precios, listas) y los mensajes de texto
+que envía/recibe el chatbot de WhatsApp.
+"""
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+def construir_lista_texto_whatsapp(
+    items: Iterable[str],
+    titulo: str = "Catálogo de Materiales"
+) -> str:
+    """Crea un mensaje de TEXTO con la lista numerada de ítems (>10 de forma típica).
+
+    La API de WhatsApp Cloud limita los Interactive List Messages a 10 filas
+    TOTALES (error #131009). Para catálogos mayores (30+ materiales) se envía
+    texto plano ordenado alfabéticamente, evitando el error 400.
+
+    Cada línea se numera correlativamente con enumerate(..., 1) para que el
+    usuario pueda responder "6" y el sistema resuelva la posición 6 (ver
+    :func:`resolver_entrada_material`).
+
+    Formato::
+
+        📋 *{titulo}* ({n} disponibles):
+
+        1. {material}
+        2. {material}
+        ...
+
+        _Escribe el nombre del material o el código para continuar._
+
+    Args:
+        items: iterable de nombres de materiales (o diccionarios con clave 'nombre').
+        titulo: título del catálogo que aparece en el mensaje.
+
+    Returns:
+        Cadena formateada lista para enviar por WhatsApp.
+    """
+    nombres = sorted({str(i) for i in items})  # alfabético y sin duplicados
+    lineas = [f"📋 *{titulo}* ({len(nombres)} disponibles):\n"]
+    for idx, mat in enumerate(nombres, 1):
+        nombre = mat.get("nombre") if isinstance(mat, dict) else mat
+        lineas.append(f"{idx}. {nombre}")
+    lineas.append("\n_Escribe el nombre del material o el código para continuar._")
+    return "\n".join(lineas)
+
+
+def resolver_entrada_material(
+    texto: str,
+    nombres_ordenados: Iterable[str]
+) -> Optional[str]:
+    """Dado lo que escribe el usuario tras ver la lista numerada, devuelve el
+    nombre del material a consultar.
+
+    Resolución:
+      - Si es un número '6' -> nombres_ordenados[5] (posición 6 de la lista
+        que se mostró, que está ordenada alfabéticamente).
+      - Si es un nombre -> se devuelve tal cual (se resuelve por coincidencia).
+
+    Args:
+        texto: texto respondido por el usuario.
+        nombres_ordenados: lista de nombres ordenados alfabéticamente.
+
+    Returns:
+        El nombre del material correspondiente, o None si el índice está
+        fuera de rango o el texto es vacío.
+    """
+    t = (texto or "").strip()
+    if not t:
+        return None
+    nombres = [str(n) for n in (nombres_ordenados or [])]
+    if t.isdigit():
+        idx = int(t)
+        if 1 <= idx <= len(nombres):
+            return nombres[idx - 1]
+        return None
+    return t
+
+
+def construir_seccion_lista_interactiva(
+    filas: Iterable,
+    titulo: str,
+    boton: str = "Ver opciones"
+) -> str:
+    """Construye el payload JSON de una sección de lista interactiva de WhatsApp.
+
+    Este formato se usa para catálogos de ≤10 materiales donde el menú de
+    selección nativa de WhatsApp no requiere workarounds.
+
+    Args:
+        filas: iterable de diccionarios con clave 'id' y 'title'.
+        titulo: título de la sección.
+        boton: texto del botón de acción.
+
+    Returns:
+        Cadena JSON con el payload de la sección interactiva.
+    """
+    import json
+    filas_list = list(filas)
+    seccion = {
+        "title": titulo,
+        "rows": [
+            {"id": f["id"], "title": f["title"], "description": f.get("description", "")}
+            for f in filas_list
+        ]
+    }
+    return json.dumps({"button": boton, "sections": [seccion]}, ensure_ascii=False)
+
+
+def es_lista_materiales(texto: str) -> bool:
+    """Detecta si el texto parece una lista de materiales con cantidades.
+
+    Heurística: al menos una línea del texto contiene un patrón
+    ``<nombre> <número>`` (con optional 'kg' al final).
+
+    Args:
+        texto: texto a evaluar.
+
+    Returns:
+        True si el texto parece una lista de materiales, False si no.
+    """
+    import re
+    if not texto:
+        return False
+    patron = re.compile(r"^\s*.+?[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE | re.MULTILINE)
+    return bool(patron.search(texto))
+
+
+def formatear_resumen_precios(
+    items: Iterable[Dict[str, Any]],
+    precios: Dict[str, float]
+) -> str:
+    """Genera el resumen final de precios con instrucciones de confirmación.
+
+    Formato::
+
+        ✅ *Revisión de precios*:
+
+        1. Cobre     -> 3,500.00 /kg
+        2. Bronce    -> 16,700.00 /kg
+        3. Carter    -> 12,000.00 /kg
+
+        *OK* o *SI* para confirmar.
+        *2 16700* para editar el precio 2.
+        *0* o *CANCELAR* para descartar todo.
+
+    Args:
+        items: lista de diccionarios con clave 'nombre'.
+        precios: diccionario {nombre_material: precio_por_kg}.
+
+    Returns:
+        Mensaje de resumen formateado para WhatsApp.
+    """
+    lineas = ["✅ *Revisión de precios*:\n"]
+    for idx, item in enumerate(items, 1):
+        nombre = item.get("nombre", "???")
+        precio = precios.get(nombre, 0.0)
+        lineas.append(f"{idx}. {nombre:15s} -> {precio:,.2f} /kg")
+    lineas.append("\n*OK* o *SI* para confirmar.")
+    lineas.append("*N VALOR* para editar (ej: *2 16700*).")
+    lineas.append("*0* o *CANCELAR* para descartar todo.")
+    return "\n".join(lineas)
+
+
+def parsear_edicion_precio(texto: str) -> Optional[Tuple[int, float]]:
+    """Parsea el comando de edición de precio: 'N VALOR'.
+
+    Ejemplos:
+      - '2 16700'     -> (2, 16700.0)
+      - '2 16,50'    -> (2, 16.5)
+      - '2 16700.50' -> (2, 16700.5)
+      - '2'           -> None (falta el valor)
+      - '0 500'       -> None (índice 0 no es válido)
+
+    Args:
+        texto: texto del usuario conteniendo el comando.
+
+    Returns:
+        Tupla (índice, nuevo_precio) o None si el formato es inválido.
+    """
+    from utils.number_parser import _parsear_numero
+    t = (texto or "").strip()
+    partes = t.split()
+    if len(partes) != 2:
+        return None
+    try:
+        idx = int(partes[0])
+        precio = _parsear_numero(partes[1])
+        if idx < 1 or precio is None:
+            return None
+        return (idx, precio)
+    except ValueError:
+        return None
+
+
+def procesar_precio_paso_a_paso(
+    texto: str,
+    items: List[Dict[str, Any]],
+    precios: Dict[str, float],
+    indice_esperado: int
+) -> Dict[str, Any]:
+    """Máquina de estados para capturar precios uno a uno.
+
+    Estados posibles en el retorno:
+
+    * ``"continuar"`` — precio capturado, avanza al siguiente ítem.
+    * ``"corregir"``   — '0' descarta el precio anterior y retrocede.
+    * ``"final"``     — todos los precios capturados, listo para resumen.
+    * ``"invalido"``  — texto no reconocido como precio ni comando especial.
+    * ``"cancelar"``  — usuario escribió 'CANCELAR'.
+
+    Args:
+        texto: respuesta del usuario.
+        items: lista de materiales esperados.
+        precios: diccionario de precios ya capturados.
+        indice_esperado: posición (1-based) del ítem que se espera recibir.
+
+    Returns:
+        Diccionario con ``tipo`` y datos adicionales (``indice``, ``precios``,
+        ``texto`` de solicitud).
+    """
+    from utils.number_parser import _parsear_numero
+    t = (texto or "").strip().lower()
+
+    if t == "cancelar":
+        return {"tipo": "cancelar", "precios": precios, "texto": ""}
+
+    if t == "0" and precios:
+        items_nombres = [it.get("nombre", "") for it in items]
+        ultimo_nombre = next(
+            (n for n in reversed(items_nombres) if n in precios),
+            None
+        )
+        precios = dict(precios)
+        if ultimo_nombre:
+            del precios[ultimo_nombre]
+        idx_correccion = 1
+        for i, nombre in enumerate(items_nombres, 1):
+            if nombre not in precios:
+                idx_correccion = i
+                break
+        return {
+            "tipo": "corregir",
+            "indice": idx_correccion - 1,
+            "precios": precios,
+            "texto": f"Precio descartado. Indica el precio para '{items[idx_correccion - 1].get('nombre')}' (o *0* para saltar):",
+        }
+
+    if indice_esperado < 1 or indice_esperado > len(items):
+        return {"tipo": "invalido", "indice": indice_esperado, "precios": precios, "texto": ""}
+
+    precio = _parsear_numero(t)
+    if precio is None:
+        return {"tipo": "invalido", "indice": indice_esperado, "precios": precios, "texto": ""}
+
+    precios = dict(precios)
+    precios[items[indice_esperado - 1].get("nombre", "")] = precio
+
+    if indice_esperado < len(items):
+        return {
+            "tipo": "continuar",
+            "indice": indice_esperado + 1,
+            "precios": precios,
+            "texto": f"Precio de '{items[indice_esperado].get('nombre')}' (o *0* para saltar):",
+        }
+
+    return {"tipo": "final", "precios": precios, "texto": ""}
+
+
+def borrador_para_nueva_lista(
+    borrador: Optional[Dict[str, Any]],
+    modo: str = "compra"
+) -> Dict[str, Any]:
+    """Reinicia el borrador para una nueva lista de materiales.
+
+    Conserva ``bodega_id`` y ``usuario_id`` (contexto), pero limpia
+    la intención anterior y la lista de ítems.
+
+    Args:
+        borrador: borrador anterior (puede ser None).
+        modo: intención que se asignará ('compra', 'venta', 'transformacion').
+
+    Returns:
+        Nuevo diccionario de borrador con las claves necesarias limpias.
+    """
+    resultado = {
+        "bodega_id": (borrador or {}).get("bodega_id"),
+        "usuario_id": (borrador or {}).get("usuario_id"),
+        "intencion": modo.upper(),
+        "items": [],
+        "precios": {},
+    }
+    # Preserve cliente (y cualquier otro campo extra del borrador).
+    for clave in ("cliente", "conductor", "conductor_id", "fecha"):
+        if clave in (borrador or {}):
+            resultado[clave] = (borrador or {})[clave]
+    return resultado
+    Returns:
+        Nuevo diccionario de borrador con las claves necesarias limpias.
+    """
+    Returns:
+        Nuevo diccionario de borrador con las claves necesarias limpias.
+    """
+    resultado = {
+        "bodega_id": (borrador or {}).get("bodega_id"),
+        "usuario_id": (borrador or {}).get("usuario_id"),
+        "intencion": modo.upper(),
+        "items": [],
+        "precios": {},
+    }
+    # Preserve cliente (y cualquier otro campo extra del borrador).
+    for clave in ("cliente", "conductor", "conductor_id", "fecha"):
+        if clave in (borrador or {}):
+            resultado[clave] = (borrador or {})[clave]
+    return resultado
+    return {
+        "bodega_id": (borrador or {}).get("bodega_id"),
+        "usuario_id": (borrador or {}).get("usuario_id"),
+        "intencion": modo.upper(),
+        "items": [],
+        "precios": {},
+    }
