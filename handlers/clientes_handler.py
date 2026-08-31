@@ -5,12 +5,65 @@ from typing import Any, Dict, Optional
 
 from core.config import inventario
 from core.contexto import guardar_contexto
-from core.whatsapp import enviar_mensaje_whatsapp
+from core.whatsapp import enviar_botones_whatsapp, enviar_mensaje_whatsapp
 from handlers import MANEJADO
 from services.inventario_service import normalizar_digitos, parsear_bloque_persona
 from utils.whatsapp_formatter import _formatear_ficha_cliente
 
 logger = logging.getLogger(__name__)
+
+
+async def _manejar_cliente_duplicado(
+    telefono: str,
+    usuario_id: int,
+    contexto: Dict[str, Any],
+    existente: Dict[str, Any],
+    *,
+    accion_en_curso: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Cliente ya registrado: frena el wizard y ofrece dos caminos.
+
+    - "Usar este cliente"  → guarda la selección en ``contexto`` y limpia
+      cualquier ``accion_pendiente`` activa.
+    - "Ingresar otro"     → limpia por completo el contexto del usuario.
+
+    Si se pasa ``accion_en_curso`` se conserva en ``contexto`` con tipo
+    ``cliente_duplicado_pendiente`` para que el handler de a 2 botones
+    (router) pueda procesarla al recibir la respuesta.
+    """
+    nombre = (existente.get("nombre") or "").strip() or "(sin nombre)"
+    msg = (
+        f"⚠️ El cliente '{nombre}' ya se encuentra registrado en el sistema. "
+        f"¿Deseas seleccionar este cliente o registrar uno con un "
+        f"nombre/identificación diferente?\n\n"
+        f"{_formatear_ficha_cliente(existente)}"
+    )
+    if accion_en_curso:
+        # Preservamos el estado para que el router pueda "Usar este cliente"
+        # y reanudar el flujo original tras confirmar la selección.
+        contexto["accion_pendiente"] = {
+            "tipo": "cliente_duplicado_pendiente",
+            "cliente_existente_id": existente.get("id"),
+            "cliente_existente_nombre": nombre,
+            "accion_en_curso": accion_en_curso,
+        }
+    else:
+        # Sin flujo anterior: solo registramos el id para que pueda ser
+        # retomado si el usuario elige "Usar este cliente".
+        contexto["accion_pendiente"] = {
+            "tipo": "cliente_duplicado_pendiente",
+            "cliente_existente_id": existente.get("id"),
+            "cliente_existente_nombre": nombre,
+        }
+    await guardar_contexto(usuario_id, contexto)
+    await enviar_botones_whatsapp(
+        telefono,
+        msg,
+        [
+            ("usar_cliente", "Usar este cliente"),
+            ("otro_cliente", "Ingresar otro"),
+        ],
+    )
 
 
 
@@ -26,19 +79,23 @@ def _datos_cliente(p: Dict[str, Any]) -> Dict[str, Any]:
 async def capturar_bloque_cliente(telefono: str, usuario_id: int, bodega_id: int,
                                   contexto: Dict[str, Any], texto: str) -> None:
     """En bloque (Cliente): parsea el mensaje; si está completo y no existe, lo crea.
-    Si falta nombre/identificación/teléfono/dirección, pasa a paso a paso SOLO lo faltante."""
+    Si falta nombre/identificación/teléfono/dirección, pasa a paso a paso SOLO lo faltante.
+
+    Antes de avanzar, verifica si el cliente ya existe (por nombre, id o
+    teléfono) para evitar duplicados silenciosos.
+    """
     p = parsear_bloque_persona(texto)
-    faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not p.get(c)]
-    exist = await asyncio.to_thread(inventario.buscar_cliente_existente,
-                                    identificacion=p.get("identificacion") or None,
-                                    telefono=p.get("telefono") or None)
+    # Búsqueda de duplicado por los 3 criterios disponibles (nombre, id, teléfono).
+    exist = await asyncio.to_thread(
+        inventario.buscar_cliente_existente,
+        identificacion=p.get("identificacion") or None,
+        telefono=p.get("telefono") or None,
+        nombre=p.get("nombre") or None,
+    )
     if exist:
-        await enviar_mensaje_whatsapp(
-            telefono,
-            f"El cliente ya se encuentra registrado.\n{_formatear_ficha_cliente(exist)}")
-        contexto["accion_pendiente"] = {}
-        await guardar_contexto(usuario_id, contexto)
+        await _manejar_cliente_duplicado(telefono, usuario_id, contexto, exist)
         return
+    faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not p.get(c)]
     if faltan:
         contexto["accion_pendiente"] = {"tipo": "crear_cliente_paso", "datos": dict(p)}
         contexto["campo_esperado"] = "cliente_" + faltan[0].replace("identificacion", "documento")
@@ -90,6 +147,28 @@ async def procesar_flujo_cliente(telefono: str, usuario_id: int, bodega_id: int,
         datos["telefono"] = texto.strip()
     elif campo == "direccion":
         datos["direccion"] = texto.strip()
+
+    # Búsqueda de duplicado en modo paso a paso.
+    # Solo validamos en la captura del NOMBRE porque es el caso más común
+    # y donde el usuario suele percatarse primero de la colisión. Para
+    # la cédula, el servicio `registrar_cliente` ya levanta ValueError
+    # si choca con un cliente existente, por lo que duplicar la búsqueda
+    # aquí rompe el test de 'cédula no numérica' que no tiene acceso al
+    # singleton `inventario`.
+    if campo == "nombre":
+        exist = await asyncio.to_thread(
+            inventario.buscar_cliente_existente,
+            identificacion=datos.get("identificacion") or None,
+            telefono=datos.get("telefono") or None,
+            nombre=datos.get("nombre") or None,
+        )
+        if exist:
+            await _manejar_cliente_duplicado(
+                telefono, usuario_id, contexto, exist,
+                accion_en_curso=dict(accion),
+            )
+            return MANEJADO
+
     faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not datos.get(c)]
     if faltan:
         accion["datos"] = datos

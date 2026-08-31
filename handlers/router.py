@@ -345,6 +345,42 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     return
                 else:
                     respuesta_texto = "Opción inválida. Escribe 1 (Cliente), 2 (Conductor) o 3 (Producto/Material)."
+            elif accion["tipo"] == "cliente_duplicado_pendiente":
+                # El usuario eligió "Usar este cliente" o "Ingresar otro".
+                if texto in ("usar_cliente", "si", "sí", "usar ese", "1"):
+                    # Confirma la selección: guarda el id en contexto y limpia.
+                    contexto["cliente_id"] = accion.get("cliente_existente_id")
+                    contexto["cliente_nombre"] = accion.get("cliente_existente_nombre")
+                    contexto["accion_pendiente"] = {}
+                    await guardar_contexto(usuario_id, contexto)
+                    await enviar_mensaje_whatsapp(
+                        telefono,
+                        f"✅ Cliente '{accion.get('cliente_existente_nombre')}' "
+                        "seleccionado. Continúa con la operación.",
+                    )
+                    return
+                if texto in ("otro_cliente", "otro", "2", "diferente"):
+                    # Limpia todo el contexto y vuelve al menú principal.
+                    contexto["accion_pendiente"] = {}
+                    contexto["campo_esperado"] = None
+                    await guardar_contexto(usuario_id, contexto)
+                    await enviar_mensaje_whatsapp(
+                        telefono,
+                        "Operación cancelada. Puedes intentar de nuevo o "
+                        "escribir *hola* para el menú principal.",
+                    )
+                    return
+                # Cualquier otro texto vuelve a mostrar los botones.
+                await enviar_botones_whatsapp(
+                    telefono,
+                    "Por favor selecciona una opción:",
+                    [
+                        ("usar_cliente", "Usar este cliente"),
+                        ("otro_cliente", "Ingresar otro"),
+                    ],
+                )
+                return
+
             elif accion["tipo"] in ("crear_cliente_bloque", "crear_cliente_paso"):
                 respuesta_texto = await clientes_handler.procesar_flujo_cliente(
                     telefono=telefono, usuario_id=usuario_id, bodega_id=bodega_id,
