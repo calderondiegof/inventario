@@ -5,7 +5,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
-from supabase import Client, create_client
+try:  # Compatibilidad con supabase v2 (sync) y v1
+    from supabase import Client, create_client  # type: ignore
+except ImportError:  # pragma: no cover - fallback de compat
+    import supabase as _supabase_mod  # type: ignore
+    Client = getattr(_supabase_mod, "Client", object)
+    create_client = getattr(_supabase_mod, "create_client", None) or (
+        lambda *_a, **_k: None
+    )
 from dotenv import load_dotenv
 
 load_dotenv()
