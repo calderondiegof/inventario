@@ -14,6 +14,7 @@ from core.whatsapp import (
 from handlers import MANEJADO
 from handlers import clientes_handler, conductores_handler, materiales_handler
 from handlers import remisiones_handler
+from handlers import pdf_handler
 from handlers.consultas_handler import (
     enviar_grafico_inventario, enviar_inventario_total, enviar_reporte_diario,
     iniciar_inventario_total, iniciar_reporte_por_fecha,
@@ -399,6 +400,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     contexto=contexto, accion=accion, texto=texto)
                 if respuesta_texto is MANEJADO:
                     return
+            elif accion["tipo"] == pdf_handler.TIPO_SELECCION_PDF:
+                respuesta_texto = await pdf_handler.manejar_respuesta_seleccion_pdf(
+                    telefono=telefono, respuesta=texto,
+                )
+                if respuesta_texto:
+                    await enviar_mensaje_whatsapp(telefono, respuesta_texto)
+                return
         except Exception as exc:
             contexto["accion_pendiente"] = {}
             respuesta_texto = f"No pude completar la acción: {exc}. Se canceló, intenta de nuevo."
@@ -534,7 +542,17 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
 
     
-    await remisiones_handler.procesar_wizard_registro(
+    
+    # ── Comando PDF ────────────────────────────────────────────────────────────
+    if texto_normalizado.startswith("pdf"):
+        resp = await pdf_handler.manejar_comando_pdf(
+            texto=texto, telefono=telefono, usuario_id=usuario_id,
+        )
+        if resp:
+            await enviar_mensaje_whatsapp(telefono, resp)
+        return
+
+await remisiones_handler.procesar_wizard_registro(
         message=message, texto=texto, texto_normalizado=texto_normalizado,
         telefono=telefono, usuario=usuario, usuario_id=usuario_id,
         bodega_id=bodega_id, contexto=contexto,

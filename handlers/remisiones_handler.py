@@ -37,6 +37,100 @@ logger = logging.getLogger(__name__)
 
 
 
+def _construir_precios_items(items, precios):
+    """Normaliza el dict de precios capturados al formato que espera la RPC.
+
+    El wizard guarda los precios con dos claves posibles (compatibilidad con
+    flujos antiguos y nuevos):
+      - ``movimiento_id`` (UUID/str del movimiento) → valor numérico.
+      - ``material_nombre`` (nombre visible) → valor numérico.
+
+    La RPC ``aprobar_remision_con_precios`` exige SIEMPRE la clave
+    ``movimiento_id`` como string (los casteo ``::uuid`` fallan si llega el
+    nombre del material). Esta función arma el dict final en el orden de
+    prioridad:
+
+    1. Si la clave del dict coincide con un ``movimiento_id`` de la lista de
+       items → úsala directamente.
+    2. Si la clave coincide con un ``material_nombre`` → mapéala al
+       ``movimiento_id`` del ítem correspondiente.
+
+    Cualquier entrada que no se pueda mapear se descarta (queda registrada
+    en el log para diagnóstico) y los items sin precio devuelven ``None``
+    para que el caller pueda advertirlos.
+    """
+    items = items or []
+    precios = precios or {}
+    if not items:
+        return {}, []
+
+    # Construir índices: por movimiento_id (str) y por material_nombre (lower).
+    por_mid = {}
+    por_nombre = {}
+    for it in items:
+        mid = it.get("movimiento_id")
+        if mid is not None:
+            por_mid[str(mid)] = it
+        nombre = it.get("material_nombre") or it.get("nombre") or it.get("material")
+        if nombre:
+            por_nombre[str(nombre).strip().lower()] = it
+
+    resultado = {}
+    sin_precio = []
+    usados_mid = set()
+
+    # Recorrer items en orden y tratar de asociar cada precio entrante.
+    for it in items:
+        mid = it.get("movimiento_id")
+        nombre = it.get("material_nombre") or it.get("nombre") or it.get("material") or ""
+        mid_str = str(mid) if mid is not None else None
+        precio_encontrado = None
+        fuente = None
+
+        if mid is None:
+            # Item sin movimiento_id: intentar resolver por nombre visible.
+            if nombre:
+                clave_lower = str(nombre).strip().lower()
+                if clave_lower in precios:
+                    precio_encontrado = precios[clave_lower]
+                    fuente = "nombre=" + nombre
+                elif nombre in precios:
+                    precio_encontrado = precios[nombre]
+                    fuente = "nombre(exacto)=" + nombre
+                if precio_encontrado is None:
+                    sin_precio.append(nombre)
+            continue  # No se puede persistir sin movimiento_id.
+
+        if mid_str in precios:
+            precio_encontrado = precios[mid_str]
+            fuente = "movimiento_id=" + mid_str
+        elif nombre and str(nombre).strip().lower() in precios:
+            precio_encontrado = precios[str(nombre).strip().lower()]
+            fuente = "nombre=" + nombre
+        elif nombre in precios:
+            # Fallback: búsqueda exacta con mayúsculas/espacios tal cual.
+            precio_encontrado = precios[nombre]
+            fuente = "nombre(exacto)=" + nombre
+
+        if precio_encontrado is None:
+            sin_precio.append(nombre or mid_str)
+            continue
+
+        try:
+            resultado[mid_str] = float(precio_encontrado)
+            usados_mid.add(mid_str)
+        except (TypeError, ValueError):
+            sin_precio.append(nombre or mid_str)
+            continue
+
+        logger.info(
+            "Precio asociado: %s -> %.2f /kg (fuente=%s)",
+            nombre or mid_str, resultado[mid_str], fuente,
+        )
+
+    return resultado, sin_precio
+
+
 TRIGGERS_ORDENES_SALIDA = {
     "ver ordenes de salida", "ordenes de salida",
     "aprobar remisiones", "aprobar remision",
@@ -443,7 +537,15 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
                 num_idx, precio_nuevo = edit
                 if 1 <= num_idx <= len(accion["items"]):
                     item = accion["items"][num_idx - 1]
-                    accion["precios"][str(item["movimiento_id"])] = precio_nuevo
+                    # Usar el nombre visible como clave para mantener
+                    # consistencia con ``procesar_precio_paso_a_paso`` y
+                    # permitir que ``_construir_precios_items`` haga el
+                    # mapeo final a movimiento_id antes de la RPC.
+                    nombre_item = (item.get("material_nombre")
+                                   or item.get("nombre")
+                                   or item.get("material")
+                                   or str(item.get("movimiento_id", "")))
+                    accion["precios"][nombre_item] = precio_nuevo
                     return (
                         f"✅ Ítem {num_idx} ({item['material_nombre']}) actualizado "
                         f"a {precio_nuevo:,.2f}/kg.\n\n"
@@ -475,13 +577,26 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
             return ("Opción inválida. Responde 1 (Moneda local), 2 (Moneda dólares), "
                                "3 (Ambas monedas) o 4 (Sin valores).")
         else:
+            # Normalizar el dict de precios a {movimiento_id: float} antes
+            # de invocar la RPC. El wizard guarda los precios con clave
+            # por nombre visible (``material_nombre``), pero la RPC
+            # ``aprobar_remision_con_precios`` hace casteo ::UUID sobre
+            # las keys y falla silenciosamente si llega un nombre
+            # (los movimientos quedan con precio_unitario NULL y el
+            # PDF muestra totales en 0.00).
+            precios_para_rpc, sin_precio = _construir_precios_items(
+                accion.get("items") or [], accion.get("precios") or {})
+            if sin_precio:
+                logger.warning(
+                    "Items sin precio al aprobar %s: %s",
+                    accion.get("numero"), sin_precio,
+                )
             await asyncio.to_thread(
                 inventario.aprobar_remision_con_precios,
                 accion["remision_id"], accion["vr_dolar_dia"],
-                # Claves tal cual (str en BD real con UUID; el servicio
-                # las normaliza a str para el JSONB). NO convertir a
-                # int: con PKs UUID lanzaría ValueError.
-                dict(accion["precios"]),
+                # Dict ya con str(movimiento_id): float. La RPC lo
+                # re-castea a ::uuid y ::numeric de forma segura.
+                precios_para_rpc,
             )
             datos_pdf = await asyncio.to_thread(
                 inventario.obtener_datos_pdf_remision, accion["numero"])
