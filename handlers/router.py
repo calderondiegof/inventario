@@ -567,12 +567,25 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
             await enviar_mensaje_whatsapp(telefono, respuesta)
         return
     
-    # ── Wizard de registro de despacho ───────────────────────────────────────
-    elif contexto.get("tipo") == "registrar_despacho":
-        respuesta = await remisiones_handler.procesar_wizard_registro(
-            texto_normalizado, telefono, contexto, supabase
-        )
-        return respuesta
-    
-    # Si llegamos aquí y no hay contexto activo, pasar al agente IA
-    return "No pude interpretar el mensaje. Inténtalo nuevamente."
+    # ── Wizard de registro de Entrada/Salida (remisión) ─────────────────────
+    # Flujo central de registro de movimientos. Si hay wizard activo
+    # (borrador_pendiente / campo_esperado) se continúa paso a paso; si NO hay
+    # contexto activo, el agente IA (DeepSeek) interpreta el texto en lenguaje
+    # natural y arranca el wizard (venta, entrada, selección/arreglo, compra,
+    # consulta, etc.). Esto restaura el comportamiento que se perdió al migrar
+    # de main_old.py a handlers: aquí se llega con accion_pendiente vacío, así
+    # que es seguro delegar siempre (procesar_wizard_registro decide si continúa
+    # un paso pendiente o interpreta texto nuevo).
+    respuesta = await remisiones_handler.procesar_wizard_registro(
+        message=message,
+        texto=texto,
+        texto_normalizado=texto_normalizado,
+        telefono=telefono,
+        usuario=usuario,
+        usuario_id=usuario_id,
+        bodega_id=bodega_id,
+        contexto=contexto,
+    )
+    # `procesar_wizard_registro` envía su propia respuesta y devuelve MANEJADO
+    # (o None), por lo que el router no debe reenviar nada aquí.
+    return respuesta

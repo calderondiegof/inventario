@@ -18,6 +18,7 @@ from core.config import (
     SUPABASE_URL, VERIFY_TOKEN, WHATSAPP_TOKEN, BOGOTA, inventario, supabase,
 )
 from core.contexto import _mensaje_es_duplicado
+from core.whatsapp import enviar_mensaje_whatsapp
 from handlers.router import procesar_un_mensaje
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,13 @@ async def procesar_webhook(data: Dict[str, Any]) -> None:
                         continue
                 logger.info(f"📨 Mensaje nuevo: {message}")
                 try:
-                    await procesar_un_mensaje(message, value.get("contacts", []))
+                    resultado = await procesar_un_mensaje(message, value.get("contacts", []))
+                    # Safety net: si el router devolvió un texto (fallback que
+                    # no se envió por sí mismo), se envía aquí para que el bot
+                    # nunca quede mudo ante un flujo no gestionado internamente.
+                    if isinstance(resultado, str) and resultado:
+                        telefono = str(message.get("from", "")).replace("+", "")
+                        await enviar_mensaje_whatsapp(telefono, resultado)
                 except Exception:
                     # NUNCA silenciar: una excepción aquí (error de PostgREST,
                     # red, bug) deja al bot mudo sin que el operador lo note.
