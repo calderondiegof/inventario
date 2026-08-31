@@ -602,6 +602,12 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
                 # re-castea a ::uuid y ::numeric de forma segura.
                 precios_para_rpc,
             )
+            # La remisión YA quedó aprobada: cerrar el wizard de valoración.
+            # Antes esta limpieza estaba al final del bloque y era INalcanzable
+            # (código muerto tras los return de arriba), por eso quedaba la
+            # accion_pendiente en 'seleccion_modo_pdf' y cualquier mensaje
+            # posterior (p.ej. "hola") seguía atrapado en el paso de moneda.
+            contexto["accion_pendiente"] = {}
             datos_pdf = await asyncio.to_thread(
                 inventario.obtener_datos_pdf_remision, accion["numero"])
             total_local = sum(
@@ -661,7 +667,6 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
                     f"⚠️ No se pudo generar o enviar el PDF. Intenta corregir la remisión "
                     f"para regenerarlo."
                 )
-            contexto["accion_pendiente"] = {}
 
 
 async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_normalizado: str,
