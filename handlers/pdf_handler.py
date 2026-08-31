@@ -148,9 +148,9 @@ async def _listar_remisiones(telefono: str, usuario_id: str) -> str:
     filas = construir_filas_listado_pdf(remisiones)
     await enviar_lista_whatsapp(
         destino=telefono,
-        header_title="Remisiones", header_subtitle="Ultimas remisiones",
-        body_text="Selecciona una remision para reimprimir:",
-        boton_principal="Ver remisiones",
-        opciones=[{"id": f"pdf {rem_id}", "title": titulo, "description": desc} for rem_id, titulo, desc in filas],
+        texto="Selecciona una remision para reimprimir:",
+        titulo_boton="Ver remisiones",
+        filas=filas,
+        titulo_lista="Remisiones",
     )
     return ""
