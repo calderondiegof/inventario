@@ -85,10 +85,22 @@ def procesar_precio_paso_a_paso(texto, items, precios, indice_esperado):
             "texto": f"Precio descartado. Indica el precio para '{items[idx_correccion - 1].get('nombre')}' (o *0* para saltar):",
         }
     if indice_esperado < 1 or indice_esperado > len(items):
-        return {"tipo": "invalido", "indice": indice_esperado, "precios": precios, "texto": ""}
+        nombre = items[indice_esperado - 1].get("nombre", "el material") if 1 <= indice_esperado <= len(items) else "el material"
+        return {
+            "tipo": "invalido",
+            "indice": indice_esperado,
+            "precios": precios,
+            "texto": f"No pude identificar el material. Indica el precio por kilo para '{nombre}' (o *0* para saltar):",
+        }
     precio = _parsear_numero(t)
     if precio is None:
-        return {"tipo": "invalido", "indice": indice_esperado, "precios": precios, "texto": ""}
+        nombre = items[indice_esperado - 1].get("nombre", "el material")
+        return {
+            "tipo": "invalido",
+            "indice": indice_esperado,
+            "precios": precios,
+            "texto": f"⚠️ '{texto}' no es un precio válido. Indica el valor numérico por kilo para '{nombre}' (ej. 16000) o *0* para saltar:",
+        }
     precios = dict(precios)
     precios[items[indice_esperado - 1].get("nombre", "")] = precio
     if indice_esperado < len(items):

@@ -401,7 +401,18 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
         if res["tipo"] == "corregir":
             return res["texto"]
         elif res["tipo"] == "invalido":
-            return res["texto"]
+            # Defensa contra respuestas vacías: si por algún motivo el texto
+            # del rechazo llegara en blanco, regeneramos un mensaje de
+            # re-pregunta con el material en curso. Evita que la API de
+            # Meta rechace la petición con "text.body is required".
+            txt = res.get("texto") or ""
+            if not txt:
+                idx = res.get("indice", 1)
+                item = accion["items"][idx - 1] if 1 <= idx <= len(accion["items"]) else {}
+                nombre = item.get("material_nombre", "el material")
+                txt = (f"⚠️ Precio inválido. Indica el valor numérico por kilo "
+                       f"para '{nombre}' (ej. 16000) o *0* para saltar:")
+            return txt
         elif res["indice"] < len(accion["items"]):
             sig = accion["items"][res["indice"]]
             return (
