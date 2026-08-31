@@ -507,8 +507,12 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
                 txt = (f"⚠️ Precio inválido. Indica el valor numérico por kilo "
                        f"para '{nombre}' (ej. 16000) o *0* para saltar:")
             return txt
-        elif res["indice"] < len(accion["items"]):
-            sig = accion["items"][res["indice"]]
+        elif res["tipo"] == "continuar":
+            # `res["indice"]` ya apunta al SIGUIENTE material a preguntar
+            # (convención 1-indexada). Como el código usa indexación 0-base
+            # al acceder a `accion["items"]`, la rama "continuar" (al quedar
+            # un material pendiente) debe restar 1 para mostrar el correcto.
+            sig = accion["items"][res["indice"] - 1]
             return (
                 f"{res['texto']}\n\n"
                 f"Ingrese el precio por kilo (en moneda local) para "
@@ -881,9 +885,14 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                     estado=r.get("estado") or "ORDEN_SALIDA",
                 )
                 logger.info(f"📄 Orden de Salida generada: {pdf_path}")
+                lineas_items = "\n".join(
+                    f"   • {it.get('material_nombre', 'Material')}: "
+                    f"{float(it.get('cantidad_kg') or 0):,.2f} kg"
+                    for it in datos.get("items", [])
+                ) or "   (sin materiales)"
                 salida = (
-                    f"✅ Orden de Salida #{numero_orden} registrada exitosamente: "
-                    f"{len(r['registros'])} material(es).\n"
+                    f"✅ Orden de Salida #{numero_orden} registrada exitosamente:\n"
+                    f"{lineas_items}\n"
                     f"📅 Fecha: {fecha}\n"
                     f"⏳ La Orden de Salida queda pendiente de valoración y aprobación "
                     f"por el área de Contabilidad."
