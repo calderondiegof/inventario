@@ -555,7 +555,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     # ── Wizard de modo de impresion PDF ──────────────────────────────────────
     if contexto.get("tipo") == "esperando_modo_impresion_pdf":
         respuesta = await pdf_handler.manejar_respuesta_modo_impresion(
-            telefono, texto_normalizado, usuario_id
+            telefono, texto_normalizado, usuario_id, contexto
         )
         if respuesta:
             await enviar_mensaje_whatsapp(telefono, respuesta)

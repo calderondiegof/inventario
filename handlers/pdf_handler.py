@@ -5,7 +5,7 @@ import logging
 from typing import List, Optional
 
 from core import config as _config
-from core.contexto import guardar_contexto, obtener_contexto
+from core.contexto import guardar_contexto
 from core.whatsapp import (
     enviar_documento_whatsapp, enviar_lista_whatsapp, enviar_mensaje_whatsapp,
 )
@@ -100,8 +100,9 @@ async def _procesar_directo(
 
 async def manejar_respuesta_modo_impresion(
     telefono: str, texto_normalizado: str, usuario_id: str,
+    contexto: Optional[dict] = None,
 ) -> str:
-    contexto = obtener_contexto(usuario_id) or {}
+    contexto = contexto or {}
     numero_remision = contexto.get("numero_remision", "")
     modo_raw = texto_normalizado.strip()
     for prefijo in ("modo_", "opcion_"):
