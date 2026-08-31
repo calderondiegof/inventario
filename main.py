@@ -27,7 +27,7 @@ from services.inventario_service import (
     construir_lista_texto_whatsapp, construir_seccion_lista_interactiva,
     borrador_para_nueva_lista, es_lista_materiales, resolver_entrada_material,
     formatear_resumen_precios, parsear_edicion_precio, procesar_precio_paso_a_paso,
-    parsear_bloque_persona,
+    parsear_bloque_persona, extraer_placas,
 )
 from services.currency_service import obtener_tasa_dolar
 
@@ -578,12 +578,53 @@ def _formatear_ficha_cliente(p: Dict[str, Any]) -> str:
     ) if p.get("nombre") else ""
 
 def _formatear_ficha_conductor(p: Dict[str, Any]) -> str:
+    """Ficha del conductor con nomenclatura dual Placa / Patente; muestra la
+    patente del remolque (placa_trailer / placa_trailer_conductor) si existe."""
+    trailer = p.get("placa_trailer") or p.get("placa_trailer_conductor") or ""
+    linea_trailer = f"\n🚛 Trailer/Patente remolque: {trailer}" if trailer else ""
+    direccion = p.get("direccion") or p.get("direccion_conductor") or ""
+    linea_direccion = f"\n📍 Dirección: {direccion}" if direccion else ""
     return (
         f"🚚 *Conductor:* {p.get('nombre','')}\n"
         f"🪪 ID: {p.get('identificacion','')}\n"
-        f"🚗 Placa: {p.get('placa','')}\n"
-        f"📱 Tel: {p.get('telefono','')}"
-    ) if p.get("nombre") else ""
+        f"🚗 Placa / Patente: {p.get('placa','') or p.get('placa_conductor','')}"
+        f"{linea_trailer}{linea_direccion}\n"
+        f"📱 Tel: {p.get('telefono','') or p.get('telefono_conductor','')}"
+    ) if p.get("nombre") or p.get("nombre_conductor") else ""
+
+
+def _datos_cliente(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Mapea el bloque parseado a los parámetros EXPLÍCITOS de registrar_cliente
+    (única vía permitida: nunca se pasan claves del conductor al cliente)."""
+    return {
+        "nombre_cliente": p.get("nombre") or "",
+        "id_cliente": p.get("identificacion") or None,
+        "telefono_cliente": p.get("telefono") or None,
+        "direccion_cliente": p.get("direccion") or None,
+    }
+
+
+def _datos_conductor(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Mapea el bloque parseado a los parámetros EXPLÍCITOS de registrar_conductor
+    (incluye dirección y la placa opcional del remolque)."""
+    return {
+        "nombre_conductor": p.get("nombre") or "",
+        "id_conductor": p.get("identificacion") or None,
+        "telefono_conductor": p.get("telefono") or None,
+        "direccion_conductor": p.get("direccion") or None,
+        "placa_conductor": p.get("placa") or None,
+        "placa_trailer_conductor": p.get("placa_trailer") or None,
+    }
+
+
+def _direccion_opcional(texto: str) -> Optional[str]:
+    """Sanitiza la respuesta del paso OPCIONAL de dirección:
+    '0', 'omitir', 'no', '-' o vacío -> None; texto libre -> la dirección
+    completa (calle, ciudad y país) tal como la escribió el usuario."""
+    t = (texto or "").strip()
+    if not t or t.lower() in {"0", "omitir", "omite", "no", "-", "ninguna", "cancelar direccion"}:
+        return None
+    return t
 
 async def capturar_bloque_cliente(telefono: str, usuario_id: int, bodega_id: int,
                                   contexto: Dict[str, Any], texto: str) -> None:
@@ -608,7 +649,7 @@ async def capturar_bloque_cliente(telefono: str, usuario_id: int, bodega_id: int
         await enviar_mensaje_whatsapp(telefono, f"Faltan datos del cliente: {', '.join(faltan)}.\n¿{_pregunta_campo_cliente(faltan[0])}")
         return
     try:
-        nuevo = await asyncio.to_thread(inventario.registrar_cliente, **p)
+        nuevo = await asyncio.to_thread(inventario.registrar_cliente, **_datos_cliente(p))
         contexto["accion_pendiente"] = {}
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, f"✅ Cliente registrado:\n{_formatear_ficha_cliente(nuevo)}")
@@ -646,7 +687,7 @@ async def capturar_bloque_conductor(telefono: str, usuario_id: int, bodega_id: i
         await enviar_mensaje_whatsapp(telefono, f"Faltan datos del conductor: {', '.join(faltan)}.\n¿{_pregunta_campo_conductor(faltan[0])}")
         return
     try:
-        nuevo = await asyncio.to_thread(inventario.registrar_conductor, **p)
+        nuevo = await asyncio.to_thread(inventario.registrar_conductor, **_datos_conductor(p))
         contexto["accion_pendiente"] = {}
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, f"✅ Conductor registrado:\n{_formatear_ficha_conductor(nuevo)}")
@@ -660,7 +701,7 @@ def _pregunta_campo_conductor(campo: str) -> str:
     return {
         "nombre": "Nombre completo del conductor:",
         "identificacion": "Identificación (CC/NIT):",
-        "placa": "Placa del vehículo:",
+        "placa": "Placa / Patente del camión (si trae remolque, agrégala: 'Trailer BBB456'):",
         "telefono": "Teléfono / celular:",
     }.get(campo, f"{campo}:")
 
@@ -1801,9 +1842,10 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     await guardar_contexto(usuario_id, contexto)
                     await enviar_mensaje_whatsapp(
                         telefono,
-                        "Envíame los datos del conductor (nombre, ID, placa, celular).\n"
+                        "Envíame los datos del conductor (nombre, ID, Placa/Patente, celular).\n"
                         "Ejemplo:\n"
                         "Pedro Gómez\nCC 1098765432\nPlaca ABC123\nCel 3112345678\n\n"
+                        "Si trae remolque, agrega su Patente (ej. 'Trailer BBB456').\n\n"
                         "O escribe *cancelar* para salir.",
                     )
                     return
@@ -1839,7 +1881,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     respuesta_texto = f"Faltan datos del cliente: {', '.join(faltan)}.\n¿{_pregunta_campo_cliente(faltan[0])}"
                 else:
                     try:
-                        nuevo = await asyncio.to_thread(inventario.registrar_cliente, **datos)
+                        nuevo = await asyncio.to_thread(inventario.registrar_cliente, **_datos_cliente(datos))
                         contexto["accion_pendiente"] = {}
                         respuesta_texto = f"✅ Cliente registrado:\n{_formatear_ficha_cliente(nuevo)}"
                     except Exception as e:
@@ -1847,24 +1889,55 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                         respuesta_texto = f"⚠️ {e}"
             elif accion["tipo"] == "crear_conductor_paso":
                 # Paso a paso de Conductor: se completa el dato faltante.
+                # La DIRECCIÓN es OPCIONAL: si viene del bloque se conserva; si
+                # no, se pregunta UNA vez al final (texto libre con ciudad/país,
+                # '0'/'omitir' para dejarla en None) y se persiste en la columna
+                # exacta 'direccion' de la tabla conductores.
                 datos = dict(accion.get("datos") or {})
-                faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
-                campo = faltan[0] if faltan else None
-                if campo == "nombre":
-                    datos["nombre"] = texto
-                elif campo == "identificacion":
-                    datos["identificacion"] = normalizar_digitos(texto)
-                elif campo == "placa":
-                    datos["placa"] = texto.strip().upper()
-                elif campo == "telefono":
-                    datos["telefono"] = texto.strip()
-                faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
-                if faltan:
-                    accion["datos"] = datos
-                    respuesta_texto = f"Faltan datos del conductor: {', '.join(faltan)}.\n¿{_pregunta_campo_conductor(faltan[0])}"
+                esperando_dir = datos.pop("_esperando_direccion", False)
+                datos.pop("_dir_preguntada", None)
+                if esperando_dir:
+                    # Respuesta al paso opcional: texto libre, '0'/'omitir' -> None.
+                    datos["direccion"] = _direccion_opcional(texto)
+                    faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
+                    if faltan:
+                        accion["datos"] = datos
+                        respuesta_texto = (f"Faltan datos del conductor: {', '.join(faltan)}.\n"
+                                           f"¿{_pregunta_campo_conductor(faltan[0])}")
+                    else:
+                        accion["datos"] = datos
                 else:
+                    faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
+                    campo = faltan[0] if faltan else None
+                    if campo == "nombre":
+                        datos["nombre"] = texto
+                    elif campo == "identificacion":
+                        datos["identificacion"] = normalizar_digitos(texto)
+                    elif campo == "placa":
+                        # Doble soporte: 1 o 2 placas/patentes ('AAA123 / BBB456'
+                        # o 'Placa: AAA123, Trailer: BBB456'); el remolque es opcional.
+                        p1, p2 = extraer_placas(texto)
+                        datos["placa"] = p1 or texto.strip().upper()
+                        if p2:
+                            datos["placa_trailer"] = p2
+                    elif campo == "telefono":
+                        datos["telefono"] = texto.strip()
+                    faltan = [c for c in ("nombre", "identificacion", "placa", "telefono") if not datos.get(c)]
+                    if faltan:
+                        accion["datos"] = datos
+                        respuesta_texto = (f"Faltan datos del conductor: {', '.join(faltan)}.\n"
+                                           f"¿{_pregunta_campo_conductor(faltan[0])}")
+                    elif not datos.get("direccion"):
+                        # Obligatorios completos: paso OPCIONAL de dirección.
+                        datos["_esperando_direccion"] = True
+                        accion["datos"] = datos
+                        respuesta_texto = ("📍 Dirección del conductor (opcional; puede incluir "
+                                           "ciudad y país).\nEscribe '0' para omitir:")
+                    else:
+                        accion["datos"] = datos
+                if not accion.get("datos", {}).get("_esperando_direccion") and not faltan:
                     try:
-                        nuevo = await asyncio.to_thread(inventario.registrar_conductor, **datos)
+                        nuevo = await asyncio.to_thread(inventario.registrar_conductor, **_datos_conductor(datos))
                         contexto["accion_pendiente"] = {}
                         respuesta_texto = f"✅ Conductor registrado:\n{_formatear_ficha_conductor(nuevo)}"
                     except Exception as e:

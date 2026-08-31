@@ -854,24 +854,24 @@ def test_crear_cliente_conductor_material():
           p2["telefono"] == "+5491112345678")
     _cons("Crear: bloque AR -> direccion Av.", "Avenida" in p2["direccion"])
 
-    # 3) Creación real contra el fake de Supabase.
+    # 3) Creación real contra el fake de Supabase (parámetros EXPLÍCITOS).
     fake, inv = _generar()
-    cli = inv.registrar_cliente(nombre=p["nombre"], identificacion=p["identificacion"],
-                                telefono=p["telefono"], direccion=p["direccion"])
+    cli = inv.registrar_cliente(nombre_cliente=p["nombre"], id_cliente=p["identificacion"],
+                                telefono_cliente=p["telefono"], direccion_cliente=p["direccion"])
     _cons("Crear: cliente insertado con id", bool(cli and cli.get("id")))
-    cond = inv.registrar_conductor(nombre=p2["nombre"], identificacion=p2["identificacion"],
-                                   placa=p2["placa"], telefono=p2["telefono"])
+    cond = inv.registrar_conductor(nombre_conductor=p2["nombre"], id_conductor=p2["identificacion"],
+                                   placa_conductor=p2["placa"], telefono_conductor=p2["telefono"])
     _cons("Crear: conductor insertado con placa", bool(cond and cond.get("placa") == "AAA123"))
 
     # 4) Duplicados -> ValueError con mensaje amigable.
     try:
-        inv.registrar_cliente(nombre="Otro", identificacion="1023456789")
+        inv.registrar_cliente(nombre_cliente="Otro", id_cliente="1023456789")
         _cons("Crear: cliente duplicado rechazado", False)
     except ValueError as e:
         _cons("Crear: cliente duplicado rechazado",
               "Ya existe un registro con la identificación 1023456789" in str(e))
     try:
-        inv.registrar_conductor(nombre="Otro", identificacion="27894567")
+        inv.registrar_conductor(nombre_conductor="Otro", id_conductor="27894567")
         _cons("Crear: conductor duplicado rechazado", False)
     except ValueError:
         _cons("Crear: conductor duplicado rechazado", True)
@@ -890,10 +890,122 @@ def test_crear_cliente_conductor_material():
 
     # 6) Falta de campo obligatorio (sin nombre) -> ValueError.
     try:
-        inv.registrar_cliente(nombre="", identificacion="999")
+        inv.registrar_cliente(nombre_cliente="", id_cliente="999")
         _cons("Crear: cliente sin nombre rechazado", False)
     except ValueError:
         _cons("Crear: cliente sin nombre rechazado", True)
+
+
+def test_atributos_explicitos_placas_y_direccion():
+    """Cambios estructurales del módulo de entidades:
+    a) Cliente: direccion con ciudad+país y nombres de campo explícitos.
+    b) Conductor: 1 placa (trailer None) y 2 placas (camión + remolque).
+    c) Sin TypeError por atributos cruzados cliente/conductor."""
+    from services.inventario_service import parsear_bloque_persona, extraer_placas
+
+    # a) Dirección del cliente con ciudad, provincia y país EN UNA sola línea.
+    bloque_cli = ("Carlos Lopez\nDNI 30456789\n"
+                  "Calle 10 #5-20, Villa Constitución, Argentina\ncel 1156784321")
+    pc = parsear_bloque_persona(bloque_cli)
+    _cons("Entidades: direccion completa con ciudad y país",
+          pc["direccion"] == "Calle 10 #5-20, Villa Constitución, Argentina")
+    # Ciudad/país en línea SEPARADA se concatenan a la dirección.
+    bloque_cli2 = ("Ana Ruiz\nCC 1098776655\nCra 7 #63-22\nBogotá, Colombia\ncel 3012345678")
+    pc2 = parsear_bloque_persona(bloque_cli2)
+    _cons("Entidades: dirección + ciudad/país en línea separada se concatena",
+          pc2["direccion"] == "Cra 7 #63-22, Bogotá, Colombia")
+
+    fake, inv = _generar()
+    cli = inv.registrar_cliente(
+        nombre_cliente=pc["nombre"], id_cliente=pc["identificacion"],
+        telefono_cliente=pc["telefono"], direccion_cliente=pc["direccion"])
+    _cons("Entidades: cliente creado con direccion_cliente ciudad+país",
+          cli["direccion"] == "Calle 10 #5-20, Villa Constitución, Argentina"
+          and cli["identificacion"] == "30456789" and cli["telefono"] == "1156784321")
+
+    # b) Conductor con UNA placa/patente -> trailer None.
+    p1 = parsear_bloque_persona("Pedro Gómez\nCC 1098765432\nPlaca ABC123\nCel 3112345678")
+    _cons("Entidades: 1 placa -> ABC123", p1["placa"] == "ABC123")
+    _cons("Entidades: 1 placa -> trailer vacío (opcional)", p1["placa_trailer"] == "")
+    cond1 = inv.registrar_conductor(
+        nombre_conductor=p1["nombre"], id_conductor=p1["identificacion"],
+        telefono_conductor=p1["telefono"], direccion_conductor=None,
+        placa_conductor=p1["placa"], placa_trailer_conductor=None)
+    _cons("Entidades: conductor 1 placa en BD, sin trailer",
+          cond1["placa"] == "ABC123" and "placa_trailer" not in cond1)
+
+    # b2) Conductor con DOS placas (camión + remolque).
+    bloque_dos = ("Luis Sosa\nDNI 28999888\nPlaca: AAA123, Trailer: BBB456\ncel 3115550000")
+    p2 = parsear_bloque_persona(bloque_dos)
+    _cons("Entidades: 2 placas etiquetadas -> camión AAA123", p2["placa"] == "AAA123")
+    _cons("Entidades: 2 placas etiquetadas -> trailer BBB456", p2["placa_trailer"] == "BBB456")
+    # También en una sola línea con separador '/'.
+    ep = extraer_placas("patente AA123BB / remolque CC456DD")
+    _cons("Entidades: extraer_placas 'AA123BB / CC456DD'",
+          ep == ("AA123BB", "CC456DD"))
+    cond2 = inv.registrar_conductor(
+        nombre_conductor=p2["nombre"], id_conductor=p2["identificacion"],
+        telefono_conductor=p2["telefono"], direccion_conductor=None,
+        placa_conductor=p2["placa"], placa_trailer_conductor=p2["placa_trailer"])
+    _cons("Entidades: conductor 2 placas en BD (camión + trailer)",
+          cond2["placa"] == "AAA123" and cond2.get("placa_trailer") == "BBB456")
+
+    # c) Cero TypeError por atributos cruzados: mapeos explícitos main.py.
+    try:
+        d = {"nombre": "X", "identificacion": "1", "telefono": "2",
+             "direccion": "Calle 1", "placa": "AAA111", "placa_trailer": ""}
+        inv.registrar_cliente(**{"nombre_cliente": d["nombre"], "id_cliente": d["identificacion"],
+                                 "telefono_cliente": d["telefono"], "direccion_cliente": d["direccion"]})
+        inv.registrar_conductor(nombre_conductor="Y", id_conductor="2",
+                                telefono_conductor="3", direccion_conductor="Av 9",
+                                placa_conductor="BBB222", placa_trailer_conductor=None)
+        _cons("Entidades: sin TypeError por atributos cruzados", True)
+    except TypeError:
+        _cons("Entidades: sin TypeError por atributos cruzados", False)
+
+
+def test_direccion_opcional_conductor():
+    """Dirección del conductor (OPCIONAL):
+    a) Con dirección completa -> se persiste en la columna 'direccion'.
+    b) Omitida (None / '0' / 'omitir') -> se guarda sin dirección y sin errores.
+    Ningún caso lanza TypeError/KeyError por atributos cruzados."""
+    from services.inventario_service import parsear_bloque_persona
+
+    fake, inv = _generar()
+
+    # a) Bloque con dirección completa (incluye ciudad y país).
+    p = parsear_bloque_persona(
+        "Miguel Torres\nDNI 32111222\nPlaca AB123CD\nCel 3415559999\n"
+        "Calle 10 #5-20, Rosario, Argentina")
+    _cons("DirCond: parser captura dirección completa",
+          p["direccion"] == "Calle 10 #5-20, Rosario, Argentina")
+    cond = inv.registrar_conductor(
+        nombre_conductor=p["nombre"], id_conductor=p["identificacion"],
+        telefono_conductor=p["telefono"],
+        direccion_conductor=p["direccion"] or None,
+        placa_conductor=p["placa"], placa_trailer_conductor=None)
+    _cons("DirCond: dirección persistida en BD",
+          cond.get("direccion") == "Calle 10 #5-20, Rosario, Argentina")
+    fila = [r for r in fake._tables["conductores"] if r["id"] == cond["id"]][0]
+    _cons("DirCond: fila BD usa columna exacta 'direccion'",
+          fila["direccion"] == "Calle 10 #5-20, Rosario, Argentina")
+
+    # b) Sin dirección (None explícito) -> se guarda sin errores.
+    cond2 = inv.registrar_conductor(
+        nombre_conductor="Sin Direccion", id_conductor="444555666",
+        telefono_conductor="3110000000", direccion_conductor=None,
+        placa_conductor="XY987ZZ", placa_trailer_conductor=None)
+    _cons("DirCond: conductor sin dirección guarda None",
+          cond2.get("direccion") is None)
+    # y con cadena vacía (bloque sin dirección) -> fila sin dirección.
+    p3 = parsear_bloque_persona("Otro Conductor\nCC 777888999\nPlaca EF456GH\ncel 3122223333")
+    _cons("DirCond: bloque sin dirección -> parser la deja vacía", p3["direccion"] == "")
+    cond3 = inv.registrar_conductor(
+        nombre_conductor=p3["nombre"], id_conductor=p3["identificacion"],
+        telefono_conductor=p3["telefono"], direccion_conductor=p3["direccion"] or None,
+        placa_conductor=p3["placa"], placa_trailer_conductor=None)
+    _cons("DirCond: dirección vacía se persiste como None",
+          cond3.get("direccion") in (None, ""))
 
 
 def main():
@@ -915,6 +1027,8 @@ def main():
     test_grafico_otros_max_10()
     test_captura_precios_correccion_y_edicion()
     test_crear_cliente_conductor_material()
+    test_atributos_explicitos_placas_y_direccion()
+    test_direccion_opcional_conductor()
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1

@@ -145,26 +145,64 @@ def normalizar_digitos(texto: str) -> str:
     return _limpiar_digitos(texto)
 
 
+def extraer_placas(texto: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extrae hasta DOS placas/patentes de un texto:
+    - 1ra coincidencia -> placa del camión/tractora (placa_conductor).
+    - 2da coincidencia -> placa del remolque (placa_trailer_conductor).
+    Soporta 'AAA123 / BBB456', 'Placa: AAA123, Trailer: BBB456',
+    'Patente AA123BB y remolque CC456DD' o placas en líneas separadas.
+    Devuelve (placa, placa_trailer); (None, None) si no hay coincidencias."""
+    encontradas = [m.group(0).upper().replace(" ", "")
+                   for m in _PATRON_PLACA.finditer(texto or "")]
+    vistas: List[str] = []
+    for pl in encontradas:
+        if pl not in vistas:
+            vistas.append(pl)
+    return (vistas[0] if vistas else None, vistas[1] if len(vistas) > 1 else None)
+
+
 def parsear_bloque_persona(texto: str) -> Dict[str, str]:
-    """Extrae nombre, identificacion, telefono, direccion y placa (opcional)
-    de un mensaje en bloque para Cliente o Conductor.
+    """Extrae nombre, identificacion, telefono, direccion y placas de un
+    mensaje en bloque para Cliente o Conductor.
 
     - Nombre: primera línea no vacía (quitando prefijos de otros campos).
     - identificacion: etiqueta CC/NIT/DNI/CUIT/ID/NID + números, o un DNI de 6-8
       dígitos suelto; se ESTRIPA el prefijo y se dejan solo los dígitos.
     - telefono: etiqueta cel/celular/tel/telefono + números, o secuencia de 10+
       dígitos (se conserva el '+ ' si existe).
-    - direccion: líneas que contienen nomenclatura de Calle/Cra/Av/Dg/Tv/...
-    - placa: patrón de placa vehicular (solo relevante para Conductor).
+    - direccion: la LÍNEA COMPLETA de ubicación (calle + ciudad + provincia/
+      país, ej. 'Calle 10 #5-20, Villa Constitución, Argentina'). Si la
+      ciudad/país vienen en la línea siguiente (sin datos técnicos), se
+      CONCATENAN a la misma dirección.
+    - placa / placa_trailer: doble soporte de placas (camión + remolque);
+      ver extraer_placas.
     """
     lineas = [l.strip().lstrip("*•-").strip() for l in _normalizar_lineas(texto)]
     nombre_candidatos: List[str] = []
-    identificacion = telefono = direccion = placa = ""
+    identificacion = telefono = direccion = ""
+    placa: Optional[str] = None
+    placa_trailer: Optional[str] = None
 
     for linea in lineas:
-        placa_m = _PATRON_PLACA.search(linea)
-        if placa_m:
-            placa = placa_m.group(0).strip().upper().replace(" ", "")
+        # Etiqueta explícita de remolque: 'Placa: AAA123, Trailer: BBB456'.
+        # La 1ra placa de la línea es el camión; la 2da, el remolque.
+        if re.search(r"\b(trailler|trailer|remolque)\b", linea, re.IGNORECASE) \
+                and _PATRON_PLACA.search(linea):
+            p_cam, p_rem = extraer_placas(linea)
+            if p_cam and not placa:
+                placa = p_cam
+            if p_rem:
+                placa_trailer = p_rem
+            continue
+        if _PATRON_PLACA.search(linea):
+            # La línea puede traer las dos placas ('AAA123 / BBB456') o solo una.
+            p1, p2 = extraer_placas(linea)
+            if p1 and not placa:
+                placa = p1
+                if p2:
+                    placa_trailer = p2
+            elif p1 and placa and not placa_trailer and p1 != placa:
+                placa_trailer = p1
         ident_m = _PATRON_IDENTIFICACION.search(linea)
         if ident_m:
             identificacion = _limpiar_digitos(ident_m.group(2))
@@ -179,8 +217,16 @@ def parsear_bloque_persona(texto: str) -> Dict[str, str]:
         if _PATRON_DIRECCION.search(linea):
             direccion = linea
             continue
+        # Continuación de dirección: si la línea anterior era la dirección y
+        # esta línea no tiene datos técnicos (ciudad, provincia o país), se
+        # CONCATENA a la misma dirección (ej. 'Villa Constitución, Argentina').
+        if direccion and not (ident_m or tel_m) and \
+                ("," in linea or re.search(r"\b(argentina|colombia|chile|peru|perú|uruguay|mexico|méxico|brasil|bolivia|ecuador|paraguay|venezuela)\b",
+                                           linea, re.IGNORECASE)):
+            direccion = f"{direccion}, {linea}"
+            continue
         # Si la línea no es identificable como campo técnico, puede ser nombre.
-        if not (ident_m or tel_m or placa_m):
+        if not (ident_m or tel_m):
             nombre_candidatos.append(linea)
 
     # Nombre: primera línea "limpia" (línea principal del bloque).
@@ -207,7 +253,8 @@ def parsear_bloque_persona(texto: str) -> Dict[str, str]:
         "identificacion": identificacion,
         "telefono": telefono,
         "direccion": direccion,
-        "placa": placa,
+        "placa": placa or "",
+        "placa_trailer": placa_trailer or "",
     }
 
 
@@ -921,41 +968,58 @@ class InventarioServiceConValidacion:
                 return filas[0]
         return None
 
-    def registrar_cliente(self, *, nombre: str, identificacion: Optional[str] = None,
-                          telefono: Optional[str] = None,
-                          direccion: Optional[str] = None) -> Dict[str, Any]:
-        """Crea un cliente (tabla 'clientes'). Lanza ValueError si ya existe
-        uno con esa identificación."""
-        nombre = (nombre or "").strip()
-        if not nombre:
+    def registrar_cliente(self, *, nombre_cliente: str,
+                          id_cliente: Optional[str] = None,
+                          telefono_cliente: Optional[str] = None,
+                          direccion_cliente: Optional[str] = None) -> Dict[str, Any]:
+        """Crea un cliente (tabla 'clientes') recibiendo ÚNICAMENTE el
+        diccionario sanitizado del cliente (nombres de campo explícitos,
+        sin riesgo de cruzarse con los del conductor). Lanza ValueError si
+        ya existe uno con esa identificación."""
+        nombre_cliente = (nombre_cliente or "").strip()
+        if not nombre_cliente:
             raise ValueError("El cliente debe tener un nombre.")
-        existente = self.supabase.table("clientes").select("*").eq("identificacion", identificacion).execute().data
+        existente = self.supabase.table("clientes").select("*").eq("identificacion", id_cliente).execute().data
         if existente:
-            raise ValueError(f"Ya existe un registro con la identificación {identificacion}.")
+            raise ValueError(f"Ya existe un registro con la identificación {id_cliente}.")
         nuevo = self.supabase.table("clientes").insert({
-            "nombre": nombre, "identificacion": identificacion,
-            "telefono": telefono, "direccion": direccion,
+            "nombre": nombre_cliente,
+            "identificacion": id_cliente,
+            "telefono": telefono_cliente,
+            "direccion": direccion_cliente,
         }).execute().data
         if not nuevo:
             raise ValueError("No se pudo registrar el cliente.")
         return nuevo[0]
 
-    def registrar_conductor(self, *, nombre: str, identificacion: Optional[str] = None,
-                             placa: Optional[str] = None,
-                             telefono: Optional[str] = None) -> Dict[str, Any]:
-        """Crea un conductor (tabla 'conductores'). Lanza ValueError si ya existe
-        uno con esa identificación."""
-        nombre = (nombre or "").strip()
-        if not nombre:
+    def registrar_conductor(self, *, nombre_conductor: str,
+                            id_conductor: Optional[str] = None,
+                            telefono_conductor: Optional[str] = None,
+                            direccion_conductor: Optional[str] = None,
+                            placa_conductor: Optional[str] = None,
+                            placa_trailer_conductor: Optional[str] = None) -> Dict[str, Any]:
+        """Crea un conductor (tabla 'conductores') recibiendo ÚNICAMENTE el
+        diccionario sanitizado del conductor (nombres de campo explícitos,
+        sin riesgo de cruzarse con los del cliente). La placa del remolque
+        (placa_trailer_conductor) es OPCIONAL: solo se inserta si viene.
+        Lanza ValueError si ya existe uno con esa identificación."""
+        nombre_conductor = (nombre_conductor or "").strip()
+        if not nombre_conductor:
             raise ValueError("El conductor debe tener un nombre.")
-        if identificacion:
-            existente = self.supabase.table("conductores").select("*").eq("identificacion", identificacion).execute().data
+        if id_conductor:
+            existente = self.supabase.table("conductores").select("*").eq("identificacion", id_conductor).execute().data
             if existente:
-                raise ValueError(f"Ya existe un registro con la identificación {identificacion}.")
-        nuevo = self.supabase.table("conductores").insert({
-            "nombre": nombre, "identificacion": identificacion,
-            "placa": placa, "telefono": telefono,
-        }).execute().data
+                raise ValueError(f"Ya existe un registro con la identificación {id_conductor}.")
+        fila = {
+            "nombre": nombre_conductor,
+            "identificacion": id_conductor,
+            "placa": placa_conductor,
+            "telefono": telefono_conductor,
+            "direccion": direccion_conductor,
+        }
+        if placa_trailer_conductor:
+            fila["placa_trailer"] = placa_trailer_conductor
+        nuevo = self.supabase.table("conductores").insert(fila).execute().data
         if not nuevo:
             raise ValueError("No se pudo registrar el conductor.")
         return nuevo[0]
