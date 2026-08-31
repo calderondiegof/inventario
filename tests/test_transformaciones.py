@@ -774,32 +774,33 @@ def test_captura_precios_correccion_y_edicion():
         {"movimiento_id": "ccc", "material_nombre": "Carter", "cantidad_kg": 30.0},
     ]
 
-    # Captura normal: ítem 0 y 1 registrados; indice queda en 1 (hay 2 registrados).
-    r0 = procesar_precio_paso_a_paso("3500", items, {}, 0)
-    _cons("precio: ítem 1 registrado (ok, indice 1)",
-          r0["tipo"] == "ok" and r0["indice"] == 1 and "aaa" in r0["precios"])
+    # Captura normal: el wizard arranca en indice=1 (convencion 1-indexada).
+    # Se captura el precio del item 1 (Cobre) y se avanza al item 2 (Bronce).
+    r0 = procesar_precio_paso_a_paso("3500", items, {}, 1)
+    _cons("precio: item 1 capturado (continuar, indice 2)",
+          r0["tipo"] == "continuar" and r0["indice"] == 2 and "Cobre" in r0["precios"])
     r1 = procesar_precio_paso_a_paso("16700", items, r0["precios"], r0["indice"])
-    _cons("precio: ítem 2 registrado (ok, indice 2)",
-          r1["tipo"] == "ok" and r1["indice"] == 2
-          and r1["precios"]["aaa"] == 3500.0 and r1["precios"]["bbb"] == 16700.0)
+    _cons("precio: item 2 capturado (continuar, indice 3)",
+          r1["tipo"] == "continuar" and r1["indice"] == 3
+          and r1["precios"].get("Cobre") == 3500.0 and r1["precios"].get("Bronce") == 16700.0)
 
-    # Corrección con '0': al solicitar el ítem 3 (indice 2), '0' descarta el ítem
-    # ANTERIOR (Bronce, bbb) y retrocede a indice 1 para volver a pedirlo.
-    r_corregir = procesar_precio_paso_a_paso("0", items, r1["precios"], 2)
+    # Correccion con '0': al solicitar el item 3 (indice 3), '0' descarta el
+    # item ANTERIOR (Bronce, indice 2) y retrocede para volver a pedirlo.
+    r_corregir = procesar_precio_paso_a_paso("0", items, r1["precios"], 3)
     _cons("precio: '0' descarta el material anterior y retrocede",
-          r_corregir["tipo"] == "corregir" and r_corregir["indice"] == 1
-          and "bbb" not in r_corregir["precios"]
-          and "aaa" in r_corregir["precios"]
+          r_corregir["tipo"] == "corregir" and r_corregir["indice"] == 2
+          and "Bronce" not in r_corregir["precios"]
+          and "Cobre" in r_corregir["precios"]
           and "Bronce" in r_corregir["texto"])
-    # El último ítem (aaa) se conserva; solo se pierde el anterior (bbb).
+    # El ultimo item (Cobre) se conserva; solo se pierde el anterior (Bronce).
     _cons("precio: solo se descarta el anterior, el resto se conserva",
-          r_corregir["precios"].get("aaa") == 3500.0
+          r_corregir["precios"].get("Cobre") == 3500.0
           and len(r_corregir["precios"]) == 1)
 
-    # '0' sin ítem anterior -> inválido (primer precio).
-    r_inv = procesar_precio_paso_a_paso("0", items, {}, 0)
-    _cons("precio: '0' sin ítem anterior es inválido",
-          r_inv["tipo"] == "invalido" and r_inv["indice"] == 0)
+    # '0' sin item anterior -> invalido (indice 1, aun no hay precios).
+    r_inv = procesar_precio_paso_a_paso("0", items, {}, 1)
+    _cons("precio: '0' sin item anterior es invalido",
+          r_inv["tipo"] == "invalido" and r_inv["indice"] == 1)
 
     # Resumen final enumerado 1..N con instrucciones.
     precios = {"aaa": 3500.0, "bbb": 16700.0, "ccc": 12000.0}

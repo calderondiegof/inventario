@@ -382,7 +382,7 @@ async def procesar_flujo_remision(telefono: str, usuario_id: int, bodega_id: int
         else:
             accion["vr_dolar_dia"] = valor
             accion["tipo"] = "captura_precio_material"
-            accion["indice"] = 0
+            accion["indice"] = 1
             primer = accion["items"][0]
             return (
                 f"Valor del dólar fijado: {valor:,.2f}\n\n"
