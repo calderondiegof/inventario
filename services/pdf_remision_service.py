@@ -86,40 +86,7 @@ class PdfRemisionService:
                 )
         return modo, None
 
-    def obtener_datos_completos_remision(self, numero: str) -> Dict[str, Any]:
-        if not self._supabase: raise PdfRemisionError("Supabase no disponible")
-        try:
-            from services.inventario_service import InventarioService
-            inv = InventarioService(supabase=self._supabase)
-            return inv.obtener_datos_pdf_remision(numero)
-        except ImportError:
-            pass
-        num = self.normalizar_numero(numero)
-        if not num: raise PdfRemisionError(f"Numero invalido: {numero}")
-        res = self._supabase.table("remisiones").select("*").eq("numero", num).limit(1).execute()
-        filas = getattr(res, "data", None) or []
-        if not filas: raise PdfRemisionNoEncontrada(f"No existe la remision '{num}'")
-        rem = filas[0]
-        cliente, conductor = {}, {}
-        if rem.get("cliente_id"):
-            c = self._supabase.table("clientes").select("*").eq("id", rem["cliente_id"]).limit(1).execute()
-            if getattr(c, "data", None): cliente = c.data[0] or {}
-        if rem.get("conductor_id"):
-            d = self._supabase.table("conductores").select("*").eq("id", rem["conductor_id"]).limit(1).execute()
-            if getattr(d, "data", None): conductor = d.data[0] or {}
-        items = [
-            {"material_nombre": (m.get("materiales") or {}).get("nombre", "Material"),
-             "cantidad_kg": abs(float(m["cantidad_kg"])),
-             "precio_unitario": m.get("precio_unitario")}
-            for m in rem.get("movimientos", []) if float(m.get("cantidad_kg", 0)) > 0
-        ]
-        return {"numero_remision": rem.get("numero", num),
-                "fecha_operacion": rem.get("fecha_operacion"),
-                "bodega_id": rem.get("bodega_id"),
-                "estado": rem.get("estado"),
-                "vr_dolar_dia": rem.get("vr_dolar_dia"),
-                "cliente": cliente, "conductor": conductor, "items": items}
-
+    # (metodo reemplazar pendiente)
     def obtener_pdf_remision(self, numero: str) -> Optional[RemisionPdf]:
         if not self._supabase: return None
         num = self.normalizar_numero(numero)
@@ -220,6 +187,79 @@ class PdfRemisionService:
                 try: Path(ruta).unlink(missing_ok=True)
                 except OSError: pass
         return True, f"Remision {remision.numero_remision} enviada."
+
+    def obtener_datos_completos_remision(self, numero: str) -> Dict[str, Any]:
+        """Reúne todos los datos necesarios para regenerar el PDF de una remisión.
+
+        Consulta la remisión por número, obtiene cliente y conductor por id,
+        y carga los items desde movimientos_inventario uniendo con materiales.
+        """
+        if not self._supabase:
+            raise PdfRemisionError("Cliente Supabase no configurado.")
+
+        num = self.normalizar_numero(numero)
+        if not num:
+            raise PdfRemisionError(f"Número de remisión inválido: '{numero}'")
+
+        # 1. Consultar remisión por número
+        filas = self._supabase.table("remisiones").select("*").eq("numero", num).execute().data
+        if not filas:
+            raise PdfRemisionNoEncontrada(f"No existe la remisión '{num}'.")
+        rem = filas[0]
+
+        # 2. Consultar cliente y conductor por id
+        cliente = {}
+        if rem.get("cliente_id"):
+            filas_cliente = self._supabase.table("clientes").select("*").eq("id", rem["cliente_id"]).execute().data
+            if filas_cliente:
+                cliente = filas_cliente[0]
+
+        conductor = {}
+        if rem.get("conductor_id"):
+            filas_conductor = self._supabase.table("conductores").select("*").eq("id", rem["conductor_id"]).execute().data
+            if filas_conductor:
+                conductor = filas_conductor[0]
+
+        # 3. Consultar movimientos con JOIN a materiales
+        movimientos = self._supabase.table("movimientos_inventario").select(
+            "id,material_id,cantidad_kg,precio_unitario,tipo_movimiento,observaciones,materiales(nombre)"
+        ).eq("lote_operacion_id", rem.get("lote_operacion_id")).eq("anulado", False).execute().data or []
+
+        # 4. Construir mapa de materiales por id como fallback si el JOIN no devuelve nombres
+        materiales_map = {}
+        ids_sin_nombre = {
+            m["material_id"] for m in movimientos
+            if not (m.get("materiales") or {}).get("nombre")
+        }
+        if ids_sin_nombre:
+            filas_materiales = self._supabase.table("materiales").select("id,nombre").in_("id", list(ids_sin_nombre)).execute().data
+            if filas_materiales:
+                materiales_map = {m["id"]: m["nombre"] for m in filas_materiales}
+
+        # 5. Mapear cada movimiento al formato esperado por el PDF
+        items = []
+        for m in movimientos:
+            nombre_material = (m.get("materiales") or {}).get("nombre")
+            if not nombre_material:
+                nombre_material = materiales_map.get(m.get("material_id"), "Material")
+            items.append({
+                "material_nombre": nombre_material,
+                "cantidad_kg": abs(float(m["cantidad_kg"])),
+                "precio_unitario": m.get("precio_unitario"),
+                "observaciones": m.get("observaciones"),
+                "tipo_movimiento": m.get("tipo_movimiento"),
+            })
+
+        return {
+            "numero_remision": rem["numero"],
+            "fecha_operacion": rem.get("fecha_operacion"),
+            "bodega_id": rem.get("bodega_id"),
+            "estado": rem.get("estado"),
+            "vr_dolar_dia": rem.get("vr_dolar_dia"),
+            "cliente": cliente,
+            "conductor": conductor,
+            "items": items,
+        }
 
     async def reimprimir_pdf_dinamico(self, numero_remision: str,
                                       modo_solicitado: str | ModoImpresion,
