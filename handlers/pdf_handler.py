@@ -65,11 +65,15 @@ async def manejar_comando_pdf(
         usuario_id,
         {"tipo": TIPO_MODO_IMPRESION, "numero_remision": numero_raw},
     )
+    filas_modo = [(
+        opt["id"], opt["title"], ""
+    ) for opt in _OPCIONES_MODO]
     await enviar_lista_whatsapp(
         destino=telefono,
-        header_title="Modo de impresion", header_subtitle=numero_raw,
-        body_text=_pregunta_modo(numero_raw),
-        boton_principal="Seleccionar modo", opciones=_OPCIONES_MODO,
+        texto=_pregunta_modo(numero_raw),
+        titulo_boton="Seleccionar modo",
+        filas=filas_modo,
+        titulo_lista="Modo de impresion",
     )
     return ""
 
