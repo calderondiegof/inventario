@@ -400,20 +400,6 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     contexto=contexto, accion=accion, texto=texto)
                 if respuesta_texto is MANEJADO:
                     return
-            elif accion["tipo"] == pdf_handler.TIPO_SELECCION_PDF:
-                respuesta_texto = await pdf_handler.manejar_respuesta_seleccion_pdf(
-                    telefono=telefono, respuesta=texto,
-                )
-                if respuesta_texto:
-                    await enviar_mensaje_whatsapp(telefono, respuesta_texto)
-                return
-        except Exception as exc:
-            contexto["accion_pendiente"] = {}
-            respuesta_texto = f"No pude completar la acción: {exc}. Se canceló, intenta de nuevo."
-        await guardar_contexto(usuario_id, contexto)
-        await enviar_mensaje_whatsapp(telefono, respuesta_texto)
-        return
-    # Atajo de saludos: responde con la bienvenida solo si el usuario NO
     # está dentro de un wizard activo (sin accion_pendiente ni campo_esperado).
     # Así un "hola" durante el registro no aborta el flujo en curso.
     if (
@@ -544,7 +530,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     
     
     # ── Comando PDF ────────────────────────────────────────────────────────────
-    if texto_normalizado.startswith("pdf"):
+    if texto_normalizado == "remisiones" or texto_normalizado.startswith("pdf"):
         resp = await pdf_handler.manejar_comando_pdf(
             texto=texto, telefono=telefono, usuario_id=usuario_id,
         )
