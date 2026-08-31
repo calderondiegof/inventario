@@ -867,7 +867,7 @@ class InventarioServiceConValidacion:
 
     def obtener_o_crear_cliente(self, *, nombre: str, documento: Optional[str] = None,
                                 telefono: Optional[str] = None, direccion: Optional[str] = None) -> Dict[str, Any]:
-        """Busca un cliente por documento (si se dio) o por nombre; si no existe, lo crea."""
+        """Busca un cliente por documento (si se dio) o por nombre normalizado (insensible a tildes y mayúsculas); si no existe, lo crea."""
         nombre = (nombre or "").strip()
         if not nombre:
             raise ValueError("Toda venta debe indicar el nombre del cliente.")
@@ -876,9 +876,11 @@ class InventarioServiceConValidacion:
             if existente:
                 return existente[0]
         else:
-            existente = self.supabase.table("clientes").select("*").ilike("nombre", nombre).execute().data
-            if existente:
-                return existente[0]
+            todos = self.supabase.table("clientes").select("*").execute().data or []
+            nombre_norm = normalizar(nombre)
+            for cli in todos:
+                if normalizar(cli.get("nombre") or "") == nombre_norm:
+                    return cli
         nuevo = self.supabase.table("clientes").insert({
             "nombre": nombre, "identificacion": documento, "telefono": telefono, "direccion": direccion,
         }).execute().data
@@ -888,7 +890,7 @@ class InventarioServiceConValidacion:
 
     def obtener_conductor_por_nombre(self, nombre: str) -> Optional[Dict[str, Any]]:
         """Busca un conductor por nombre en la tabla 'conductores' (tabla espejo de clientes)."""
-        filas = self.supabase.table("conductores").select("*").ilike("nombre", (nombre or "").strip()).execute().data
+        filas = self.supabase.table("conductores").select("*").ilike("nombre", normalizar(nombre or "")).execute().data
         return filas[0] if filas else None
 
     def obtener_o_crear_conductor(self, *, nombre: str, identificacion: Optional[str] = None,
@@ -907,7 +909,7 @@ class InventarioServiceConValidacion:
             if filas:
                 existente = filas[0]
         if not existente:
-            filas = self.supabase.table("conductores").select("*").ilike("nombre", nombre).execute().data
+            filas = self.supabase.table("conductores").select("*").ilike("nombre", normalizar(nombre)).execute().data
             if filas:
                 existente = filas[0]
         if existente:
@@ -934,7 +936,7 @@ class InventarioServiceConValidacion:
                                  telefono: Optional[str] = None,
                                  nombre: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Solo búsqueda (sin crear): devuelve el cliente que coincida por
-        identificacion, luego telefono y luego nombre (en ese orden)."""
+        identificacion, luego telefono y luego nombre normalizado (insensible a tildes y mayúsculas)."""
         if identificacion:
             filas = self.supabase.table("clientes").select("*").eq("identificacion", identificacion).execute().data
             if filas:
@@ -944,9 +946,11 @@ class InventarioServiceConValidacion:
             if filas:
                 return filas[0]
         if nombre:
-            filas = self.supabase.table("clientes").select("*").ilike("nombre", (nombre or "").strip()).execute().data
-            if filas:
-                return filas[0]
+            todos = self.supabase.table("clientes").select("*").execute().data or []
+            nombre_norm = normalizar(nombre)
+            for cli in todos:
+                if normalizar(cli.get("nombre") or "") == nombre_norm:
+                    return cli
         return None
 
     def buscar_conductor_existente(self, *, identificacion: Optional[str] = None,
@@ -963,7 +967,7 @@ class InventarioServiceConValidacion:
             if filas:
                 return filas[0]
         if nombre:
-            filas = self.supabase.table("conductores").select("*").ilike("nombre", (nombre or "").strip()).execute().data
+            filas = self.supabase.table("conductores").select("*").ilike("nombre", normalizar(nombre or "")).execute().data
             if filas:
                 return filas[0]
         return None
@@ -1446,7 +1450,7 @@ class InventarioServiceConValidacion:
         self.supabase.table("remisiones").insert(data).execute()
 
     def obtener_cliente_por_nombre(self, nombre: str) -> Optional[Dict[str, Any]]:
-        filas = self.supabase.table("clientes").select("*").ilike("nombre", (nombre or "").strip()).execute().data
+        filas = self.supabase.table("clientes").select("*").ilike("nombre", normalizar(nombre or "")).execute().data
         return filas[0] if filas else None
 
     def actualizar_cliente(self, cliente_id: int, campos: Dict[str, Any]) -> Dict[str, Any]:

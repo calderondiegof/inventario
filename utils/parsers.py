@@ -148,6 +148,14 @@ def _normalizar_texto(texto: str) -> str:
     return t.strip().lower()
 
 
+def normalizar_nombre(nombre: str) -> str:
+    """Versión pública de `_normalizar_texto`: remueve tildes/acentos y
+    convierte a minúsculas para comparaciones insensibles a mayúsculas y
+    tildes. Así 'Juan Pérez' y 'juan perez' se consideran iguales."""
+    return _normalizar_texto(nombre)
+
+
+
 def _parsear_numero(texto: str) -> Optional[float]:
     """Parsea un número escrito con formato español o inglés:
     '4120,50' -> 4120.5 | '1.250.000' -> 1250000 | '1,250.50' -> 1250.5.

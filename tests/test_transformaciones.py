@@ -1008,6 +1008,45 @@ def test_direccion_opcional_conductor():
           cond3.get("direccion") in (None, ""))
 
 
+def test_normalizacion_y_validacion_cliente():
+    """Valida:
+    a) Normalización de nombres con tildes ('Juan perez' == 'Juan Pérez').
+    b) Rechazo de cédulas no numéricas en el paso a paso de clientes.
+    """
+    import asyncio
+    from utils.parsers import normalizar_nombre
+    from handlers.clientes_handler import procesar_flujo_cliente
+    
+    # Crear un mock de Supabase y la instancia del servicio
+    # (Copiar la lógica de las funciones de test existentes)
+    from tests.test_transformaciones import FakeSupabase
+    fake = FakeSupabase()
+    inv = InventarioServiceConValidacion(fake)
+
+    # a) Normalización de nombres con tildes / mayúsculas
+    n1 = normalizar_nombre("Juan Pérez")
+    n2 = normalizar_nombre("juan perez")
+    _cons("Normalización nombres tildes y mayúsculas", n1 == n2 == "juan perez")
+
+    # Registrar en DB de prueba y buscar con distinta tilde/mayús
+    c1 = inv.registrar_cliente(nombre_cliente="María José Pérez", id_cliente="123456", telefono_cliente="3001112233", direccion_cliente="Calle 1")
+    encontrado = inv.buscar_cliente_existente(nombre="maria jose perez")
+    _cons("Búsqueda cliente sin tildes coincide con tildes", encontrado is not None and encontrado["id"] == c1["id"])
+
+    # b) Validación cédula no numérica en paso a paso
+    contexto = {"accion_pendiente": {"tipo": "crear_cliente_paso", "datos": {"nombre": "Carlos Gómez"}}, "campo_esperado": "cliente_documento"}
+    # Envío de texto no numérico (ej. repite el nombre)
+    resp = asyncio.run(procesar_flujo_cliente("12345", 1, 1, contexto, contexto["accion_pendiente"], "Carlos Gómez"))
+    _cons("Rechazo cédula no numérica con mensaje de advertencia", "⚠️ La cédula o documento debe contener números válidos" in resp)
+    _cons("Mantiene el estado pendiente tras cédula inválida", contexto["accion_pendiente"].get("tipo") == "crear_cliente_paso")
+
+    # Envío de cédula numérica válida avanza
+    resp_valida = asyncio.run(procesar_flujo_cliente("12345", 1, 1, contexto, contexto["accion_pendiente"], "987654321"))
+    _cons("Avanza o registra con cédula numérica válida", "Faltan datos del cliente" in resp_valida or "✅ Cliente registrado" in resp_valida)
+
+
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -1029,6 +1068,8 @@ def main():
     test_crear_cliente_conductor_material()
     test_atributos_explicitos_placas_y_direccion()
     test_direccion_opcional_conductor()
+    test_normalizacion_y_validacion_cliente()
+
     if _FAILURES:
         print("\n=== %d FALLO(S) ===\n%s" % (len(_FAILURES), "\n".join(" - " + f for f in _FAILURES)))
         return 1

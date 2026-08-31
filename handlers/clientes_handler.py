@@ -80,9 +80,12 @@ async def procesar_flujo_cliente(telefono: str, usuario_id: int, bodega_id: int,
     faltan = [c for c in ("nombre", "identificacion", "telefono", "direccion") if not datos.get(c)]
     campo = faltan[0] if faltan else None
     if campo == "nombre":
-        datos["nombre"] = texto
+        datos["nombre"] = texto.strip()
     elif campo == "identificacion":
-        datos["identificacion"] = normalizar_digitos(texto)
+        doc_limpio = normalizar_digitos(texto)
+        if not doc_limpio or not any(ch.isdigit() for ch in doc_limpio):
+            return "⚠️ La cédula o documento debe contener números válidos. Por favor, ingresa un número de documento válido (ej: 12345678):"
+        datos["identificacion"] = doc_limpio
     elif campo == "telefono":
         datos["telefono"] = texto.strip()
     elif campo == "direccion":
