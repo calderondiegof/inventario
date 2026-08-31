@@ -400,6 +400,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     contexto=contexto, accion=accion, texto=texto)
                 if respuesta_texto is MANEJADO:
                     return
+        except Exception as exc:
+            contexto["accion_pendiente"] = {}
+            respuesta_texto = f"No pude completar la acción: {exc}. Se canceló, intenta de nuevo."
+        await guardar_contexto(usuario_id, contexto)
+        await enviar_mensaje_whatsapp(telefono, respuesta_texto)
+        return
+    # Atajo de saludos: responde con la bienvenida solo si el usuario NO
     # está dentro de un wizard activo (sin accion_pendiente ni campo_esperado).
     # Así un "hola" durante el registro no aborta el flujo en curso.
     if (
