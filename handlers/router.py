@@ -41,6 +41,54 @@ SUB_MENU_INVENTARIO = [
 ]
 
 
+# Saludos simples que el bot entiende en cualquier momento fuera de un wizard
+# activo. La comparación se hace sobre `texto_normalizado` (sin tildes, en
+# minúsculas, sin espacios extra) para que "Hola", "  hola  " y "HOLA" se
+# traten igual. NO se incluye "menu" como saludo porque "menu" ya es un
+# trigger del wizard 'crear_menu' (router 269); la captura de "menu" en el
+# atajo de saludos lo atendería antes de que esa rama se evalúe y bloquearía
+# el submenú unificado de creación.
+SALUDOS_BIENVENIDA = frozenset({
+    "hola",
+    "holaa",
+    "holaaa",
+    "hi",
+    "hello",
+    "buenas",
+    "buenos dias",
+    "buenas tardes",
+    "buenas noches",
+    "buen dia",
+    "inicio",
+    "empezar",
+    "empezamos",
+    "arrancamos",
+    "que tal",
+    "que mas",
+    "saludos",
+    "saludame",
+    "salu2",
+    "ola",       # "ola" típico cuando el teclado móvil no tiene ñ
+    "klk",       # "klk" muy usado en Colombia
+    "sirva",
+})
+
+
+_MENSAJE_BIENVENIDA = (
+    "¡Hola! 👋 Soy el bot de inventario. Puedo ayudarte con:\n\n"
+    "1️⃣ Ingresar inventario (entrada, selección/arreglo, salida/venta)\n"
+    "2️⃣ Ver inventario (totales, movimientos, reporte de hoy)\n"
+    "3️⃣ Anular o corregir una remisión\n\n"
+    "También puedes escribirme lo que quieras en lenguaje natural, por "
+    "ejemplo:\n"
+    "• \"Hoy entró Revuelto de Cooperativa 1500 kg\"\n"
+    "• \"Vendí Cobre 100 kg a Acero SA\"\n"
+    "• \"Seleccioné Carter 40, Cable 20\"\n\n"
+    "Cuando quieras empezar, responde con el número o la opción. "
+    "Para volver a este menú en cualquier momento, escribe *hola*."
+)
+
+
 async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str, Any]]) -> None:
     logger.info(f"🔄 Iniciando procesamiento de mensaje: {message}")
     tipo_mensaje = message.get("type")
@@ -321,6 +369,17 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, respuesta_texto)
         return
+    # Atajo de saludos: responde con la bienvenida solo si el usuario NO
+    # está dentro de un wizard activo (sin accion_pendiente ni campo_esperado).
+    # Así un "hola" durante el registro no aborta el flujo en curso.
+    if (
+        not contexto.get("accion_pendiente")
+        and not contexto.get("campo_esperado")
+        and texto_normalizado in SALUDOS_BIENVENIDA
+    ):
+        await enviar_mensaje_whatsapp(telefono, _MENSAJE_BIENVENIDA)
+        return
+
     # Comandos directos por texto
     if texto.lower() in {"anular", "corregir", "anular/corregir rem", "anular rem", "corregir rem", "anular o corregir"}:
         contexto["accion_pendiente"] = {"tipo": "espera_remision_modo"}
