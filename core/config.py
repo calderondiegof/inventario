@@ -47,6 +47,10 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "").strip()
 META_APP_SECRET = os.getenv("META_APP_SECRET", "").strip()
+# Configuración de Ollama (alternativa local a DeepSeek)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b").strip()
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama").strip()  # Ollama no requiere API key real
 
 logger.warning("=" * 60)
 logger.warning("VERIFICACIÓN DE VARIABLES DE CONFIGURACIÓN:")
@@ -57,6 +61,8 @@ logger.warning(f"✓ VERIFY_TOKEN: {'✅' if VERIFY_TOKEN else '❌'}")
 logger.warning(f"✓ WHATSAPP_TOKEN: {'✅' if WHATSAPP_TOKEN else '❌'}")
 logger.warning(f"✓ PHONE_NUMBER_ID: {'✅' if PHONE_NUMBER_ID else '❌'}")
 logger.warning(f"✓ META_APP_SECRET: {'✅' if META_APP_SECRET else '❌'}")
+logger.warning(f"✓ OLLAMA_BASE_URL: {'✅' if OLLAMA_BASE_URL else '❌'}")
+logger.warning(f"✓ OLLAMA_MODEL: {'✅' if OLLAMA_MODEL else '❌'}")
 logger.warning("=" * 60)
 
 # Inicialización de Supabase

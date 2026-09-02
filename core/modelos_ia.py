@@ -260,17 +260,61 @@ Esquema exacto:
 
 
 async def llamar_deepseek(prompt: str, mensaje: str) -> RespuestaAgente:
-    assert _config.http_client is not None
-    respuesta = await _config.http_client.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
-        json={"model": "deepseek-chat", "temperature": 0, "response_format": {"type": "json_object"},
-              "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": mensaje}]},
-    )
-    respuesta.raise_for_status()
-    contenido = respuesta.json()["choices"][0]["message"]["content"]
-    contenido = re.sub(r"^```(?:json)?\s*|\s*```$", "", contenido.strip(), flags=re.I)
-    return RespuestaAgente.model_validate_json(contenido)
+    """Llama al LLM. Si USE_OLLAMA=1 (o la variable de entorno esta activa),
+    usa Ollama local; en caso contrario, usa la API de DeepSeek.
+
+    El timeout del cliente HTTP (config.http_client) se amplia automaticamente
+    a 180s al usar Ollama porque los modelos locales son mas lentos."""
+    from core.config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY
+    import os as _os
+
+    use_ollama = _os.getenv("USE_OLLAMA", "0").strip() in ("1", "true", "TRUE", "yes", "YES")
+
+    if use_ollama:
+        logger.info(f"🦙 Usando Ollama local ({OLLAMA_MODEL}) en {OLLAMA_BASE_URL}")
+        # Si el cliente global tiene un timeout corto, creamos uno local con timeout largo
+        # (los modelos locales de 7B pueden tardar 60-120s en responder).
+        client = _config.http_client
+        try:
+            timeout_actual = getattr(client.timeout, "connect", 30) if client else 30
+        except Exception:
+            timeout_actual = 30
+        if timeout_actual < 120:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(180.0))
+            cerrar_local = True
+        else:
+            cerrar_local = False
+
+        try:
+            url = f"{OLLAMA_BASE_URL.rstrip('/')}/v1/chat/completions"
+            respuesta = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": OLLAMA_MODEL,
+                    "temperature": 0,
+                    "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": mensaje}],
+                },
+            )
+            respuesta.raise_for_status()
+            contenido = respuesta.json()["choices"][0]["message"]["content"]
+            contenido = re.sub(r"^```(?:json)?\s*|\s*```$", "", contenido.strip(), flags=re.I)
+            return RespuestaAgente.model_validate_json(contenido)
+        finally:
+            if cerrar_local:
+                await client.aclose()
+    else:
+        assert _config.http_client is not None
+        respuesta = await _config.http_client.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "deepseek-chat", "temperature": 0, "response_format": {"type": "json_object"},
+                  "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": mensaje}]},
+        )
+        respuesta.raise_for_status()
+        contenido = respuesta.json()["choices"][0]["message"]["content"]
+        contenido = re.sub(r"^```(?:json)?\s*|\s*```$", "", contenido.strip(), flags=re.I)
+        return RespuestaAgente.model_validate_json(contenido)
 
 
 def fusionar_borrador(anterior: Dict[str, Any], nuevo: RespuestaAgente) -> Dict[str, Any]:
