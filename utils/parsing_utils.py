@@ -76,13 +76,43 @@ _SINONIMOS: Dict[str, str] = {
     "basura": "Basura", "tierra": "Basura", "merma": "Merma",
 }
 
+# Sinónimos PALABRA A PALABRA del dominio del inventario. Se aplican cuando la
+# frase completa no es un material del catálogo y soportan materiales compuestos
+# de 2+ palabras que repiten la primera palabra a modo de clasificador:
+#   'grueso'      -> 'carter'
+#   'rechazo'     -> 'arreglo'
+# Así 'rechazo grueso' -> 'arreglo carter', 'rechazo cobre' -> 'arreglo cobre',
+# 'grueso' -> 'carter', sin recortar la frase a una sola palabra.
+_SINONIMOS_PALABRA: Dict[str, str] = {
+    "grueso": "carter",
+    "rechazo": "arreglo",
+    "alambre": "cable",
+    "hierro": "acero",
+    "tierra": "basura",
+}
+
 _FRASES: List[str] = [
     "cable quema", "cable quemado", "alambre quemado",
     "acero inoxidable", "carter de motor",
 ]
 
 def aplicar_sinonimos(texto: str) -> str:
-    return _SINONIMOS.get((texto or "").strip(), texto)
+    t = (texto or "").strip().lower()
+    if not t:
+        return (texto or "").strip()
+    # 1) Frase exacta conocida (frases compuestas del catálogo, ej.
+    #    'acero inoxidable' -> 'acero inoxidable'). Se devuelve en minúsculas
+    #    para que coincida con las claves normalizadas del catálogo.
+    if t in _SINONIMOS:
+        return _SINONIMOS[t].lower()
+    # 2) Sinónimos palabra a palabra (ej. 'grueso'->'carter', 'rechazo'->'arreglo').
+    #    Reemplaza cada palabra de forma independiente, de modo que los
+    #    materiales compuestos que repiten la primera palabra ('rechazo grueso',
+    #    'rechazo cobre') se normalizan sin perder el resto de la frase.
+    palabras = [p for p in t.split() if p]
+    if not palabras:
+        return (texto or "").strip()
+    return " ".join(_SINONIMOS_PALABRA.get(p, p) for p in palabras)
 
 def aplicar_frases(texto: str) -> str:
     resultado = texto

@@ -621,6 +621,65 @@ def test_caso_produccion_basura_merma_y_omitidos():
           and msg2.startswith("✅ Selección registrada: 1 resultado(s)"))
 
 
+def test_sinonimos_palabra_a_palabra_en_seleccion():
+    """Los sinónimos del dominio ('grueso'->'carter', 'rechazo'->'arreglo') se
+    aplican PALABRA A PALABRA, de modo que los materiales compuestos de 2+
+    palabras que repiten la primera palabra se resuelven sin recortar la frase:
+
+        'grueso'        -> 'carter'
+        'rechazo grueso'-> 'arreglo carter'
+        'rechazo cobre' -> 'arreglo cobre'
+
+    Con esto el caso reportado del usuario ya NO genera 'no_encontrados' y la
+    merma solo corresponde a la línea de Basura (450 kg), no a los materiales
+    omitidos. Regresion de los 4 bugs de la entrada real.
+    """
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Lamina", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Carter", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Olla", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Acero", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Arreglo Carter", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Cable", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Radiador", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Perfil", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Bronce", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Cobre", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Arreglo Cobre", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    _cargar(fake, B, "Revuelto", 20000)
+    texto = (
+        "* Lamina 685\n* Grueso 3831\n* Olla 576\n* Acero 447\n"
+        "* Rechazo grueso 716\n* Cable 277\n* Radiador 286\n* Perfil 223\n"
+        "* Bronce 43\n* Cobre 22\n* Rechazo cobre 41\n* Basura 450"
+    )
+    items, no_encontrados, merma_lista = inv.resolver_lista_materiales(texto)
+    _cons("sinónimos: ningún material omitido (grueso/rechazo resueltos)",
+          no_encontrados == [])
+    _cons("sinónimos: 11 items vendibles (sin basura)",
+          len(items) == 11)
+    _cons("sinónimos: 'grueso' -> Carter / 'rechazo grueso' -> Arreglo Carter",
+          all(i["material_nombre"] == "Carter" for i in items if i["cantidad_kg"] == 3831)
+          and all(i["material_nombre"] == "Arreglo Carter" for i in items if i["cantidad_kg"] == 716))
+    _cons("sinónimos: 'rechazo cobre' -> Arreglo Cobre",
+          all(i["material_nombre"] == "Arreglo Cobre" for i in items if i["cantidad_kg"] == 41))
+    # Merma SOLO de la basura (450), jamás de los materiales resueltos.
+    _cons("sinónimos: merma = solo Basura (450)", abs(merma_lista - 450.0) < 0.01)
+    total_vendible = sum(i["cantidad_kg"] for i in items)
+    _cons("sinónimos: revuelto descontado = resultados + merma",
+          abs(total_vendible - 7147.0) < 0.01)
+    # El servicio descuenta exactamente resultados + merma (7597 = 7147 + 450).
+    r = inv.registrar_seleccion_revuelto(
+        bodega_id=B, usuario_id=9, fecha_operacion="2026-09-03",
+        resultados=items, merma_kg=merma_lista,
+    )
+    _cons("sinónimos: servicio descuenta 7597 del Revuelto",
+          abs(r["revuelto_descontado"] - 7597.0) < 0.01
+          and abs(r["merma_kg"] - 450.0) < 0.01)
+
+
 def test_catalogo_completo_mas_de_30():
     """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
     (no está limitada a 10): con 35 registros se cargan los 35, ordenados
@@ -1110,6 +1169,7 @@ def main():
     test_purga_borrador_en_error()
     test_mensaje_seleccion_revuelto()
     test_caso_produccion_basura_merma_y_omitidos()
+    test_sinonimos_palabra_a_palabra_en_seleccion()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()

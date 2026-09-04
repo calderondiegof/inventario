@@ -238,7 +238,16 @@ def consolidar_seleccion(datos: Dict[str, Any], texto: str) -> None:
     if es_lista_materiales(texto):
         items, no_encontrados, merma_lista = inventario.resolver_lista_materiales(texto)
         datos["items"] = items
-        datos["merma_kg"] = float(datos.get("merma_kg") or 0) + merma_lista
+        # La merma se RECALCULA solo desde las líneas que SÍ se resolvieron como
+        # material MERMA del catálogo (basura/tierra). NO se conserva ni se suma
+        # la merma que la IA pudiera haber inferido, porque esa puede incluir
+        # materiales no registrables (omitidos) que NO son merma real: un material
+        # que no se registra no puede descontarse ni de la merma ni del Revuelto.
+        datos["merma_kg"] = merma_lista
+        # Se descarta la `cantidad_revuelto_procesada` que pudiera traer la IA:
+        # si incluyera los omitidos, descontaría de más del Revuelto. El servicio
+        # la recalcula como resultados + merma (solo lo realmente registrado).
+        datos["cantidad_revuelto_procesada"] = None
         omitidos = list(no_encontrados)
     else:
         # Ruta IA: separar items de tipo MERMA hacia merma_kg.
