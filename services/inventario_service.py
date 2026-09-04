@@ -860,20 +860,16 @@ class InventarioServiceConValidacion:
 
         mermas: List[Dict[str, Any]] = []
         if merma:
-            merma_mat = self.obtener_material_por_nombre(material_merma_nombre or "Basura")
-            if merma_mat and merma_mat.tipo_material == TipoMaterial.MERMA.value:
-                movimientos.append(self._movimiento(
-                    usuario_id=usuario_id, bodega_id=bodega_id, material_id=merma_mat.id,
-                    fuente_id=fuente_proceso.id, tipo=TipoTransaccion.TRANSFORMACION, cantidad=merma, fecha=fecha,
-                    lote_id=lote_id, observaciones=f"Merma (vendible) de {nombre_proceso} de {origen.nombre}",
-                ))
-            else:
-                mermas = [{
-                    "lote_operacion_id": lote_id, "bodega_id": bodega_id, "usuario_id": usuario_id,
-                    "material_origen_id": origen.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
-                    "fecha_operacion": fecha,
-                    "observaciones": f"Merma de {nombre_proceso}; sin material MERMA de catálogo para stock",
-                }]
+            # La merma (basura/tierra) NUNCA genera stock vendible: se registra
+            # en la tabla de mermas de proceso (igual que en la selección de
+            # Revuelto). No se crea un movimiento sobre el material 'Basura',
+            # porque eso la ingresaría al inventario como si fuera vendible.
+            mermas = [{
+                "lote_operacion_id": lote_id, "bodega_id": bodega_id, "usuario_id": usuario_id,
+                "material_origen_id": origen.id, "cantidad_kg": merma, "tipo_merma": "BASURA_TIERRA",
+                "fecha_operacion": fecha,
+                "observaciones": f"Merma de {nombre_proceso}; no genera stock vendible",
+            }]
 
         registros = self._guardar_lote(movimientos, mermas)
         _registrar_huella(huella)

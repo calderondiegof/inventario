@@ -27,7 +27,7 @@ from services.inventario_service import (
     procesar_precio_paso_a_paso,
 )
 from utils.parsers import (
-    VENTA_CAMPOS_PASO, _parsear_numero, parsear_campos_cliente,
+    VENTA_CAMPOS_PASO, _parsear_numero, extraer_fecha_texto, parsear_campos_cliente,
     parsear_campos_cliente_venta, parsear_fecha_colombiana,
     parsear_material_cantidad,
 )
@@ -756,6 +756,15 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
             await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, "No pude interpretar el mensaje. Inténtalo nuevamente.")
         return MANEJADO
+    # Red de seguridad de fecha: si el usuario escribió la fecha inline en un
+    # mensaje nuevo (ej. '27/08 Quemé 1354 kg...' o '26-08 se queman...') y la
+    # IA no la extrajo, se captura de forma determinista. Sin esto, cuando la
+    # fecha inline no se detecta y no se pide, el registro cae por defecto en
+    # la fecha del mensaje ('hoy'), que es el error que se reportó.
+    if not datos.get("fecha_operacion"):
+        fecha_inline = extraer_fecha_texto(texto)
+        if fecha_inline:
+            datos["fecha_operacion"] = fecha_inline
     # Consolidación de la selección: resolución determinista de listas (nada
     # se omite en silencio) y clasificación de merma (Basura → merma_kg).
     consolidar_seleccion(datos, texto)
@@ -853,7 +862,7 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                       f"descontado {r.get('descontado_origen', 0):,.2f} kg)."
                       if r.get("duplicado") else
                       (f"Transformación registrada desde {r['origen']}: "
-                       f"{len(r.get('materiales_salida') or [])} producto(s), "
+                       f"{max(len(r.get('materiales_salida') or []), 1)} movimiento(s), "
                        f"merma {r['merma_kg']:,.2f} kg, "
                        f"ingreso inventario: {r.get('ingreso_inventario', 0):,.2f} kg, "
                        f"total descontado {r['origen']}: -{r.get('descontado_origen', 0):,.2f} kg, "

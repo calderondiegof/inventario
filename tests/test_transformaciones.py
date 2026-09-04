@@ -223,6 +223,13 @@ def _saldo(fake, bodega_id, nombre):
                if r["bodega_id"] == bodega_id and r["material_id"] == mid)
 
 
+def _merma_total(fake, bodega_id):
+    """Suma la merma (basura/tierra) registrada en la tabla mermas_proceso."""
+    return sum(float(r.get("cantidad_kg") or 0)
+               for r in fake._tables.get("mermas_proceso", [])
+               if r.get("bodega_id") == bodega_id)
+
+
 B = 1  # bodega unica usada en las pruebas
 
 
@@ -248,8 +255,12 @@ def test_regla1_revuelto():
     _cons("Regla1: Revuelto 1000 - 750 = 250", abs(_saldo(fake, B, "Revuelto") - 250) < 0.01)
     _cons("Regla1: Carter +300", abs(_saldo(fake, B, "Carter") - 300) < 0.01)
     _cons("Regla1: Cable +200", abs(_saldo(fake, B, "Cable") - 200) < 0.01)
-    _cons("Regla1: Basura(MERMA) +250 vendible", abs(_saldo(fake, B, "Basura") - 250) < 0.01)
-    _cons("Regla1: 4 movimientos (1 debito+2 creditos+1 merma)", bool(r["registros"]) and len(r["registros"]) == 4)
+    _cons("Regla1: Basura NO genera stock vendible (saldo 0)",
+          abs(_saldo(fake, B, "Basura")) < 0.01)
+    _cons("Regla1: merma 250 registrada en mermas_proceso",
+          abs(_merma_total(fake, B) - 250.0) < 0.01)
+    _cons("Regla1: 3 movimientos (1 debito + 2 creditos, sin movimiento de merma)",
+          bool(r["registros"]) and len(r["registros"]) == 3)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +277,10 @@ def test_regla2_quema_cable():
     )
     _cons("Regla2: Cable -1000", abs(_saldo(fake, B, "Cable")) < 0.01)
     _cons("Regla2: Cable Quemado +600", abs(_saldo(fake, B, "Cable Quemado") - 600) < 0.01)
-    _cons("Regla2: Basura +400", abs(_saldo(fake, B, "Basura") - 400) < 0.01)
+    _cons("Regla2: Basura NO genera stock vendible (saldo 0)",
+          abs(_saldo(fake, B, "Basura")) < 0.01)
+    _cons("Regla2: merma 400 registrada en mermas_proceso",
+          abs(_merma_total(fake, B) - 400.0) < 0.01)
     _cons("Regla2: NO afecta Revuelto", abs(_saldo(fake, B, "Revuelto")) < 0.01)
     # Ejemplo del usuario (caso 2): 1354 de cable -> 600 cobre + 754 basura.
     # ingreso_inventario = SOLO los materiales aprovechables (600), NUNCA la basura.
@@ -301,7 +315,10 @@ def test_regla3_seleccion_tecnica_carter():
     _cons("Regla3: Chatarra +200", abs(_saldo(fake, B, "Chatarra") - 200) < 0.01)
     _cons("Regla3: Cable +50", abs(_saldo(fake, B, "Cable") - 50) < 0.01)
     _cons("Regla3: Arreglo Dificil +50", abs(_saldo(fake, B, "Arreglo Dificil") - 50) < 0.01)
-    _cons("Regla3: Basura +200", abs(_saldo(fake, B, "Basura") - 200) < 0.01)
+    _cons("Regla3: Basura NO genera stock vendible (saldo 0)",
+          abs(_saldo(fake, B, "Basura")) < 0.01)
+    _cons("Regla3: merma 200 registrada en mermas_proceso",
+          abs(_merma_total(fake, B) - 200.0) < 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +720,32 @@ def test_sinonimos_palabra_a_palabra_en_seleccion():
     _cons("sinónimos: servicio descuenta 7597 del Revuelto",
           abs(r["revuelto_descontado"] - 7597.0) < 0.01
           and abs(r["merma_kg"] - 450.0) < 0.01)
+    # La merma de selección (450 basura) NO genera stock vendible.
+    _cons("sinónimos: merma de selección NO es stock vendible (Basura saldo 0)",
+          abs(_saldo(fake, B, "Basura")) < 0.01)
+
+
+def test_extraer_fecha_inline():
+    """La fecha escrita inline en un mensaje nuevo (ej. '27/08 Quemé ...' o
+    '26-08 se queman...') se captura de forma determinista con
+    `extraer_fecha_texto`, evitando que el registro caiga por defecto en la
+    fecha del mensaje ('hoy'). Regression del bug de la fecha en transformaciones."""
+    from utils.parsers import extraer_fecha_texto
+    # Fecha como primera línea del mensaje.
+    f1 = extraer_fecha_texto("27/08\nQuemé 1354 kg de cable, salieron 600 kg de cobre y 754 kg de basura")
+    _cons("fecha inline: '27/08' al inicio -> 2026-08-27", f1 == "2026-08-27")
+    # Fecha con guión (dd-mm) en la primera línea.
+    f2 = extraer_fecha_texto("26-08\nse queman 1300 kg de cable, ingresan 1000 de cable quemado")
+    _cons("fecha inline: '26-08' al inicio -> 2026-08-26", f2 == "2026-08-26")
+    # Fecha completa dd-mm-aaaa.
+    f3 = extraer_fecha_texto("15-07-2026\ncompra material")
+    _cons("fecha inline: '15-07-2026' -> 2026-07-15", f3 == "2026-07-15")
+    # Si no hay fecha, devuelve None (no se inventa 'hoy').
+    f4 = extraer_fecha_texto("Quemé 1354 kg de cable y salieron 600 kg de cobre")
+    _cons("fecha inline: sin fecha -> None (no se asume hoy)", f4 is None)
+    # Fecha relativa 'ayer' como línea.
+    f5 = extraer_fecha_texto("ayer\nquemé 1300 kg de cable")
+    _cons("fecha inline: 'ayer' -> fecha de ayer", f5 is not None)
 
 
 def test_catalogo_completo_mas_de_30():
@@ -1195,6 +1238,7 @@ def main():
     test_mensaje_seleccion_revuelto()
     test_caso_produccion_basura_merma_y_omitidos()
     test_sinonimos_palabra_a_palabra_en_seleccion()
+    test_extraer_fecha_inline()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()
