@@ -838,9 +838,12 @@ class InventarioServiceConValidacion:
             round(merma, 2), round(total_procesado, 2),
         )
         if _verificar_duplicada(huella):
-            return {"duplicado": True, "lote_id": None, "registros": [], "merma_kg": merma,
+            return {"duplicado": True, "lote_id": None, "registros": [],
+                    "merma_kg": merma,
                     "origen": origen.nombre, "tipo_origen": origen.tipo_material,
-                    "materiales_salida": [mat.nombre for mat, _ in resultados_validados]}
+                    "materiales_salida": [mat.nombre for mat, _ in resultados_validados],
+                    "ingreso_inventario": total_resultados,
+                    "descontado_origen": total_procesado}
 
         fuente_proceso = self._fuente_por_tipo("PROCESO_SELECCION")
 
@@ -878,6 +881,8 @@ class InventarioServiceConValidacion:
             "lote_id": lote_id, "registros": registros, "merma_kg": merma,
             "origen": origen.nombre, "tipo_origen": origen.tipo_material,
             "materiales_salida": [mat.nombre for mat, _ in resultados_validados],
+            "ingreso_inventario": total_resultados,
+            "descontado_origen": total_procesado,
         }
 
     def registrar_venta_multiple(self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,

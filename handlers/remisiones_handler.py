@@ -848,10 +848,16 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                 material_merma_nombre=datos.get("material_merma"),
                 nombre_proceso=datos.get("nombre_proceso") or "Transformación",
             )
-            salida = ("⚠️ Transformación duplicada: ya se registró hace instantes; no se volvió a registrar."
+            salida = (f"⚠️ Transformación duplicada desde {r['origen']}: ya se registró hace instantes; "
+                      f"no se volvió a registrar (merma {r['merma_kg']:,.2f} kg, "
+                      f"descontado {r.get('descontado_origen', 0):,.2f} kg)."
                       if r.get("duplicado") else
-                      (f"Transformación registrada desde {r['origen']}: {len(r['registros'])} movimiento(s), "
-                       f"merma {r['merma_kg']:,.2f} kg, fecha {fecha}."))
+                      (f"Transformación registrada desde {r['origen']}: "
+                       f"{len(r.get('materiales_salida') or [])} producto(s), "
+                       f"merma {r['merma_kg']:,.2f} kg, "
+                       f"ingreso inventario: {r.get('ingreso_inventario', 0):,.2f} kg, "
+                       f"total descontado {r['origen']}: -{r.get('descontado_origen', 0):,.2f} kg, "
+                       f"fecha {fecha}."))
         elif intencion == "COMPRA_DIRECTA":
             r = await asyncio.to_thread(inventario.registrar_compra_directa, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, fuente_nombre=datos["fuente_compra"], items=datos["items"])
             salida = f"Compra registrada: {len(r['registros'])} material(es), fecha {fecha}."

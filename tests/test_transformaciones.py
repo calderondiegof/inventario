@@ -258,7 +258,7 @@ def test_regla1_revuelto():
 def test_regla2_quema_cable():
     fake, svc = _generar()
     _cargar(fake, B, "Cable", 1000.0)
-    svc.registrar_transformacion_material(
+    r = svc.registrar_transformacion_material(
         bodega_id=B, usuario_id=3, fecha_operacion="2026-01-26",
         material_origen_nombre="Cable",
         resultados=[{"material_nombre": "Cable Quemado", "cantidad_kg": 600}],
@@ -268,6 +268,15 @@ def test_regla2_quema_cable():
     _cons("Regla2: Cable Quemado +600", abs(_saldo(fake, B, "Cable Quemado") - 600) < 0.01)
     _cons("Regla2: Basura +400", abs(_saldo(fake, B, "Basura") - 400) < 0.01)
     _cons("Regla2: NO afecta Revuelto", abs(_saldo(fake, B, "Revuelto")) < 0.01)
+    # Ejemplo del usuario (caso 2): 1354 de cable -> 600 cobre + 754 basura.
+    # ingreso_inventario = SOLO los materiales aprovechables (600), NUNCA la basura.
+    # descontado_origen = 1354 (todo lo que sale del cable, merma incluida).
+    _cons("Regla2: ingreso_inventario = solo productos (600)",
+          abs(r.get("ingreso_inventario", 0) - 600.0) < 0.01)
+    _cons("Regla2: descontado_origen = productos + merma (1000)",
+          abs(r.get("descontado_origen", 0) - 1000.0) < 0.01
+          and abs(merma := float(r.get("merma_kg") or 0)) < 0.01
+          and abs(r["descontado_origen"] - (r["ingreso_inventario"] + merma)) < 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -531,12 +540,17 @@ def test_mensaje_seleccion_revuelto():
           and salida[0]["tipo_movimiento"] == TipoTransaccion.TRANSFORMACION.value)
     # Mensaje con la MISMA plantilla que usa main.py.
     num_resultados = len(r["registros"]) - 1
+    ingreso = r["revuelto_descontado"] - r["merma_kg"]
     fecha = "2026-08-26"
     msg = (f"Selección registrada: {num_resultados} resultado(s), "
-           f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:g} kg, "
+           f"merma {r['merma_kg']:.2f} kg, "
+           f"ingreso inventario: {ingreso:,.2f} kg, "
+           f"total descontado revuelto: -{r['revuelto_descontado']:,.2f} kg, "
            f"fecha {fecha}.")
-    _cons("mensaje: formato exacto con 'revuelto: -60 kg'",
-          msg == "Selección registrada: 2 resultado(s), merma 0.00 kg, revuelto: -60 kg, fecha 2026-08-26.")
+    _cons("mensaje: formato exacto separa merma / ingreso / total descontado",
+          msg == "Selección registrada: 2 resultado(s), merma 0.00 kg, "
+                 "ingreso inventario: 60.00 kg, total descontado revuelto: -60.00 kg, "
+                 "fecha 2026-08-26.")
     # Con merma y cantidad explícita de Revuelto procesada.
     _cargar(fake, B, "Revuelto", 1000)
     r2 = inv.registrar_seleccion_revuelto(
@@ -546,8 +560,9 @@ def test_mensaje_seleccion_revuelto():
     )
     _cons("servicio: cantidad explícita se captura intacta (60.5)",
           abs(r2["revuelto_descontado"] - 60.5) < 0.01)
-    msg2 = f"revuelto: -{r2['revuelto_descontado']:g} kg"
-    _cons("mensaje: :g formatea sin ceros ni comas", msg2 == "revuelto: -60.5 kg")
+    ingreso2 = r2["revuelto_descontado"] - r2["merma_kg"]
+    _cons("mensaje: con merma, el total descontado (60.5) = ingreso (50.5) + merma (10)",
+          abs(ingreso2 - 50.5) < 0.01 and abs(r2["merma_kg"] - 10) < 0.01)
 
 
 def test_caso_produccion_basura_merma_y_omitidos():
@@ -594,8 +609,11 @@ def test_caso_produccion_basura_merma_y_omitidos():
     _cons("prod: revuelto descontado 7740 (items 6780 + merma 960)",
           abs(r["revuelto_descontado"] - 7740.0) < 0.01)
     # Plantilla ESTRICTA de main.py (construir_mensaje_seleccion):
+    ingreso = r["revuelto_descontado"] - r["merma_kg"]
     msg = (f"✅ Selección registrada: {len(r['registros']) - 1} resultado(s), "
-           f"merma {r['merma_kg']:.2f} kg, revuelto: -{r['revuelto_descontado']:.0f} kg, "
+           f"merma {r['merma_kg']:.2f} kg, "
+           f"ingreso inventario: {ingreso:,.2f} kg, "
+           f"total descontado revuelto: -{r['revuelto_descontado']:,.2f} kg, "
            f"fecha 2026-08-27.")
     if no_encontrados:
         detalle = "\n".join(f"- {o} kg (Material no encontrado en el catálogo)"
@@ -604,21 +622,28 @@ def test_caso_produccion_basura_merma_y_omitidos():
                 f"registrar y fueron ignorados:\n{detalle}")
     esperado = (
         "✅ Selección registrada: 10 resultado(s), merma 960.00 kg, "
-        "revuelto: -7740 kg, fecha 2026-08-27.\n\n"
+        "ingreso inventario: 6,780.00 kg, total descontado revuelto: -7,740.00 kg, "
+        "fecha 2026-08-27.\n\n"
         "⚠️ **Atención:** Los siguientes ítems no se pudieron registrar y fueron ignorados:\n"
         "- Rechazo de cobre y bronce 69 kg (Material no encontrado en el catálogo)")
-    _cons("prod: mensaje con sección ⚠️ exacta", msg == esperado)
+    _cons("prod: mensaje con sección ⚠️ exacta y merma/ingreso desglosados", msg == esperado)
     # Sin omitidos: el mensaje NO incluye la sección de alerta.
     _cargar(fake, B, "Revuelto", 1000)
     r2 = inv.registrar_seleccion_revuelto(
         bodega_id=B, usuario_id=9, fecha_operacion="2026-08-27",
         resultados=[{"material_nombre": "Cable", "cantidad_kg": 100}], merma_kg=0,
     )
+    ingreso2 = r2["revuelto_descontado"] - r2["merma_kg"]
     msg2 = (f"✅ Selección registrada: {len(r2['registros']) - 1} resultado(s), "
-            f"merma {r2['merma_kg']:.2f} kg, revuelto: -{r2['revuelto_descontado']:.0f} kg, "
+            f"merma {r2['merma_kg']:.2f} kg, "
+            f"ingreso inventario: {ingreso2:,.2f} kg, "
+            f"total descontado revuelto: -{r2['revuelto_descontado']:,.2f} kg, "
             f"fecha 2026-08-27.")
-    _cons("prod: sin omitidos no hay sección ⚠️", "Atención" not in msg2
-          and msg2.startswith("✅ Selección registrada: 1 resultado(s)"))
+    _cons("prod: sin omitidos no hay sección ⚠️ y total descontado = ingreso (100)",
+          "Atención" not in msg2
+          and msg2.startswith("✅ Selección registrada: 1 resultado(s)")
+          and "total descontado revuelto: -100.00 kg" in msg2
+          and "ingreso inventario: 100.00 kg" in msg2)
 
 
 def test_sinonimos_palabra_a_palabra_en_seleccion():

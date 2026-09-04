@@ -59,19 +59,16 @@ def construir_mensaje_seleccion(
 ) -> str:
     """Construye el mensaje de confirmación de una selección de Revuelto.
 
-    Plantilla ESTRICTA (validada por ``test_mensaje_seleccion_revuelto`` y
-    ``test_caso_produccion_basura_merma_y_omitidos``):
+    Muestra los tres valores por separado para que quede claro que la merma
+    NO entra al inventario como material y ya está contabilizada dentro del
+    total descontado del Revuelto (sin doble descuento):
 
-    - Con omitidos::
+    - ``merma``: solo la basura/tierra que se descuenta del Revuelto.
+    - ``ingreso inventario``: solo los materiales aprovechables (Σ resultados).
+    - ``total descontado revuelto``: resultados + merma (lo que sale del bruto).
 
-        ✅ Selección registrada: {N} resultado(s), merma {merma:.2f} kg,
-        revuelto: -{revuelto:.0f} kg, fecha {fecha}.
-
-        ⚠️ **Atención:** Los siguientes ítems no se pudieron registrar
-        y fueron ignorados:
-        - {item} kg (Material no encontrado en el catálogo)
-
-    - Sin omitidos: solo la primera línea, sin sección de alerta.
+    Con omitidos se agrega la sección de alerta — los ítems omitidos JAMÁS se
+    ignoran en silencio.
 
     Parámetros:
         resultado: dict devuelto por
@@ -87,10 +84,15 @@ def construir_mensaje_seleccion(
     num_resultados = max(len(registros) - 1, 0)
     merma = float(resultado.get("merma_kg") or 0)
     revuelto = float(resultado.get("revuelto_descontado") or 0)
+    # Queda claro que la merma NO entra al inventario: solo ingresa los
+    # materiales aprovechables, y el total descontado del Revuelto ya la incluye.
+    ingreso_inventario = max(revuelto - merma, 0.0)
 
     msg = (
         f"✅ Selección registrada: {num_resultados} resultado(s), "
-        f"merma {merma:.2f} kg, revuelto: -{revuelto:.0f} kg, "
+        f"merma {merma:.2f} kg, "
+        f"ingreso inventario: {ingreso_inventario:,.2f} kg, "
+        f"total descontado revuelto: -{revuelto:,.2f} kg, "
         f"fecha {fecha}."
     )
 
