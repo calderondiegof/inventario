@@ -245,7 +245,7 @@ class InventarioServiceConValidacion:
         """
         lineas = [l.strip().lstrip("*-•").strip()
                   for l in re.split(r"[\n,;]+", texto or "")]
-        from utils.parsers import extraer_fecha_texto
+        from utils.parsers import es_nombre_merma, extraer_fecha_texto
         items: List[Dict[str, Any]] = []
         acumulados: Dict[str, float] = {}
         no_encontrados: List[str] = []
@@ -262,6 +262,13 @@ class InventarioServiceConValidacion:
             if not m:
                 continue
             nombre, cantidad = m.group(1).strip(), float(m.group(2).replace(",", "."))
+            # Merma por NOMBRE (independiente del catálogo): cualquier línea que
+            # empiece con 'basura'/'tierra' (ej. 'basura plastico', 'basura
+            # plastico goma', 'basura tierra') es MERMA y NUNCA se suma al
+            # inventario, aunque el material no exista como MERMA en el catálogo.
+            if es_nombre_merma(nombre):
+                merma_kg += cantidad
+                continue
             # Unicidad: UNA resolución por línea; se consume y se avanza.
             mat = self.obtener_material_por_nombre(nombre)
             if mat is None:

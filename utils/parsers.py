@@ -156,6 +156,18 @@ def _coincidencia_fecha(texto: str) -> Optional[Tuple[int, int, Optional[int]]]:
     return None
 
 
+def es_nombre_merma(nombre: Optional[str]) -> bool:
+    """True si el nombre de material comienza con 'basura' o 'tierra'
+    (ej. 'basura', 'basura plastico', 'basura plastico goma', 'basura tierra').
+    En ese caso la línea debe tratarse como MERMA y NUNCA sumarse al inventario.
+
+    La normalización quita tildes y pasa a minúsculas, de modo que cualquier
+    variante (con/sin tilde, mayúsculas) se detecta como merma, aunque el
+    nombre no sea un material MERMA del catálogo."""
+    base = normalizar(nombre or "")
+    return base.startswith("basura") or base.startswith("tierra")
+
+
 def parsear_fecha_colombiana(texto: str) -> Optional[str]:
     texto = (texto or "").strip().lower()
     hoy = datetime.now(BOGOTA).date()

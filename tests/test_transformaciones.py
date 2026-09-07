@@ -802,6 +802,44 @@ def test_fecha_no_se_trata_como_material_y_formatos():
           abs(merma_lista - 986.0) < 0.01)
 
 
+def test_nombre_merma_por_prefijo():
+    """Cualquier material cuyo nombre EMPIECE con 'basura'/'tierra' (ej.
+    'basura plastico', 'basura plastico goma', 'basura tierra') se trata como
+    MERMA y NUNCA se suma al inventario, aunque no sea un material MERMA del
+    catálogo ni exista en él."""
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Grueso", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Plastico", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Goma", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Basura", "tipo_material": "MERMA", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    from utils.parsers import es_nombre_merma
+    # El helper detecta cualquier variante con prefijo 'basura'/'tierra'.
+    _cons("merma nombre: 'basura plastico' es merma",
+          es_nombre_merma("basura plastico") is True)
+    _cons("merma nombre: 'basura plastico goma' es merma",
+          es_nombre_merma("basura plastico goma") is True)
+    _cons("merma nombre: 'basura tierra' es merma",
+          es_nombre_merma("basura tierra") is True)
+    _cons("merma nombre: 'Basura' es merma", es_nombre_merma("Basura") is True)
+    _cons("merma nombre: 'tierra' es merma", es_nombre_merma("tierra") is True)
+    _cons("merma nombre: 'Grueso' NO es merma", es_nombre_merma("Grueso") is False)
+    # En la resolución de una lista, las líneas con prefijo basura van a merma.
+    texto = (
+        "* Grueso 3442\n* Basura plastico 300\n"
+        "* Basura plastico goma 150\n* Basura tierra 120"
+    )
+    items, no_encontrados, merma_lista = inv.resolver_lista_materiales(texto)
+    _cons("resolver basura: ningún material omitido",
+          no_encontrados == [])
+    _cons("resolver basura: solo Grueso es vendible (1 item)", len(items) == 1)
+    _cons("resolver basura: merma = 300+150+120 = 570",
+          abs(merma_lista - 570.0) < 0.01
+          and not any("Basura" in i["material_nombre"] for i in items))
+
+
 def test_catalogo_completo_mas_de_30():
     """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
     (no está limitada a 10): con 35 registros se cargan los 35, ordenados
@@ -1294,6 +1332,7 @@ def main():
     test_sinonimos_palabra_a_palabra_en_seleccion()
     test_extraer_fecha_inline()
     test_fecha_no_se_trata_como_material_y_formatos()
+    test_nombre_merma_por_prefijo()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()

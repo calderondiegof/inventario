@@ -27,8 +27,8 @@ from services.inventario_service import (
     procesar_precio_paso_a_paso,
 )
 from utils.parsers import (
-    VENTA_CAMPOS_PASO, _parsear_numero, extraer_fecha_texto, parsear_campos_cliente,
-    parsear_campos_cliente_venta, parsear_fecha_colombiana,
+    VENTA_CAMPOS_PASO, _parsear_numero, es_nombre_merma, extraer_fecha_texto,
+    parsear_campos_cliente, parsear_campos_cliente_venta, parsear_fecha_colombiana,
     parsear_material_cantidad,
 )
 from utils.whatsapp_formatter import construir_mensaje_seleccion
@@ -255,7 +255,11 @@ def consolidar_seleccion(datos: Dict[str, Any], texto: str) -> None:
         vendibles: List[Dict[str, Any]] = []
         for it in items:
             mat = inventario.obtener_material_por_nombre(it.get("material_nombre") or "")
-            if mat and (mat.tipo_material or "").upper() == "MERMA":
+            # Merma por NOMBRE o por tipo: comienza con 'basura'/'tierra' o es
+            # un material MERMA del catálogo. Nunca se suma al inventario.
+            if es_nombre_merma(it.get("material_nombre")) or (
+                mat and (mat.tipo_material or "").upper() == "MERMA"
+            ):
                 datos["merma_kg"] = float(datos.get("merma_kg") or 0) + float(it.get("cantidad_kg") or 0)
             else:
                 vendibles.append(it)
