@@ -193,12 +193,29 @@ def borrador_para_nueva_lista(borrador: Optional[Dict[str, Any]], modo: str = "c
     return resultado
 
 def es_lista_materiales(texto: str) -> bool:
-    """Detecta si el texto parece una lista de materiales con cantidades."""
+    """Detecta si el texto parece una lista de materiales con cantidades.
+
+    NO considera una fecha (ej. '04-09-2026', '04 sep', '04/09') como lista de
+    material-cantidad: eso impediría responder con una fecha a un paso del
+    wizard sin que se reinterprete como material."""
     import re
+    from utils.parsers import extraer_fecha_texto
     if not texto:
         return False
-    patron = re.compile(r"^\s*.+?[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE | re.MULTILINE)
-    return bool(patron.search(texto))
+    patron = re.compile(
+        r"^\s*.+?[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for linea in (texto or "").splitlines():
+        ln = linea.strip()
+        if not ln:
+            continue
+        # Una línea que es una fecha no es un ítem de material: se descarta.
+        if extraer_fecha_texto(ln):
+            continue
+        if patron.search(ln):
+            return True
+    return False
 
 def formatear_resumen_precios(items: Iterable[Dict[str, Any]], precios: Dict[str, float]) -> str:
     """Genera el resumen final de precios con instrucciones de confirmacion.

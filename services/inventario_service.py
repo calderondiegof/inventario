@@ -245,12 +245,18 @@ class InventarioServiceConValidacion:
         """
         lineas = [l.strip().lstrip("*-•").strip()
                   for l in re.split(r"[\n,;]+", texto or "")]
+        from utils.parsers import extraer_fecha_texto
         items: List[Dict[str, Any]] = []
         acumulados: Dict[str, float] = {}
         no_encontrados: List[str] = []
         merma_kg = 0.0
         for linea in lineas:
             if not linea:
+                continue
+            # Una línea que sea (o contenga) una fecha no es un material: se
+            # ignora y no se reporta como omitida (evita el falso 'Selección
+            # 04-09-2026 kg (Material no encontrado)').
+            if extraer_fecha_texto(linea):
                 continue
             m = _LINEA_MATERIAL_CANTIDAD.match(linea)
             if not m:

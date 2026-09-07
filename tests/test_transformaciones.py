@@ -748,6 +748,60 @@ def test_extraer_fecha_inline():
     _cons("fecha inline: 'ayer' -> fecha de ayer", f5 is not None)
 
 
+def test_fecha_no_se_trata_como_material_y_formatos():
+    """La fecha NUNCA se interpreta como material ni como lista de material-cantidad.
+
+    Dos regresiones juntas:
+    - Problema B: '04-09', '04/09', '04 sep' y '04 09' se interpretan como fecha
+      (año en curso), no como material.
+    - Problema A: cuando el usuario responde con una fecha a un paso del wizard
+      (ej. '04-09-2026'), `es_lista_materiales` NO debe devolver True (o el
+      reparseo de `consolidar_seleccion` borraría los ítems ya capturados y se
+      volvería a pedir los datos).
+    """
+    from utils.parsers import extraer_fecha_texto, parsear_fecha_colombiana
+    # Formato de fecha con mes por nombre y con espacio (año en curso).
+    _cons("fecha: '04 sep' -> 2026-09-04 (año en curso)",
+          parsear_fecha_colombiana("04 sep") == "2026-09-04")
+    _cons("fecha: '04 09' -> 2026-09-04",
+          parsear_fecha_colombiana("04 09") == "2026-09-04")
+    _cons("fecha: '04/09' -> 2026-09-04",
+          parsear_fecha_colombiana("04/09") == "2026-09-04")
+    _cons("fecha: '04-09' -> 2026-09-04",
+          parsear_fecha_colombiana("04-09") == "2026-09-04")
+    # Fecha inline dentro de una línea con texto (prefijo de la selección).
+    _cons("fecha inline: 'Selección 04-09-2026\\n* Grueso 3442' -> 2026-09-04",
+          extraer_fecha_texto("Selección 04-09-2026\n* Grueso 3442") == "2026-09-04")
+    # La respuesta fecha NO se considera lista de material-cantidad (Problema A).
+    _cons("es_lista_materiales('04-09-2026') es False (no reparsea como material)",
+          es_lista_materiales("04-09-2026") is False)
+    _cons("es_lista_materiales('04 sep') es False",
+          es_lista_materiales("04 sep") is False)
+    # Pero una lista REAL de materiales sigue detectándose.
+    _cons("es_lista_materiales selección real es True",
+          es_lista_materiales("* Grueso 3442\n* Basura 986") is True)
+    # La línea de fecha dentro de una selección NO es un ítem omitido.
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Grueso", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Bobina", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Cobre", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Basura", "tipo_material": "MERMA", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    texto = (
+        "Selección 04-09-2026\n"
+        "* Grueso 3442\n* Bobina 822\n* Cobre 10\n* Basura 986"
+    )
+    items, no_encontrados, merma_lista = inv.resolver_lista_materiales(texto)
+    _cons("resolver: la fecha inline NO se reporta como omitida",
+          no_encontrados == [])
+    _cons("resolver: 3 materiales vendibles (fecha y basura excluidas)",
+          len(items) == 3)
+    _cons("resolver: merma solo la basura (986)",
+          abs(merma_lista - 986.0) < 0.01)
+
+
 def test_catalogo_completo_mas_de_30():
     """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
     (no está limitada a 10): con 35 registros se cargan los 35, ordenados
@@ -1239,6 +1293,7 @@ def main():
     test_caso_produccion_basura_merma_y_omitidos()
     test_sinonimos_palabra_a_palabra_en_seleccion()
     test_extraer_fecha_inline()
+    test_fecha_no_se_trata_como_material_y_formatos()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()

@@ -112,8 +112,52 @@ DIAS_SEMANA = {
     "jueves": 3, "viernes": 4, "sabado": 5, "sábado": 5, "domingo": 6,
 }
 
+# Meses en español (nombre completo y abreviaturas). Se usan para interpretar
+# fechas como '04 sep', '04 septiembre', '04/sep/2026' y variantes.
+MESES_ES = {
+    "enero": 1, "ene": 1,
+    "febrero": 2, "feb": 2,
+    "marzo": 3, "mar": 3,
+    "abril": 4, "abr": 4,
+    "mayo": 5, "may": 5,
+    "junio": 6, "jun": 6,
+    "julio": 7, "jul": 7,
+    "agosto": 8, "ago": 8,
+    "septiembre": 9, "setiembre": 9, "sept": 9, "set": 9, "sep": 9,
+    "octubre": 10, "oct": 10,
+    "noviembre": 11, "nov": 11,
+    "diciembre": 12, "dic": 12,
+}
+
+# Un día y un mes, separados por '-', '/' o espacio, con año opcional (dd-mm-aaaa).
+# El lookahead negativo (?!\d) evita capturar números de varias cifras (kg).
+_FECHA_NUM = re.compile(r"(\d{1,2})\s*[-/ ]\s*(\d{1,2})(?:\s*[-/ ]\s*(\d{2,4}))?(?!\d)")
+# Día + mes por nombre (ej. '04 sep', '04 septiembre'), año opcional.
+_FECHA_NOMBRE = re.compile(
+    r"(\d{1,2})\s*[-/ ]\s*([a-z]+)(?:\s*[-/ ]\s*(\d{2,4}))?(?!\d)", re.IGNORECASE)
+
+
+def _coincidencia_fecha(texto: str) -> Optional[Tuple[int, int, Optional[int]]]:
+    """Busca el primer 'día mes [año]' en el texto (no solo al inicio).
+
+    Devuelve (dia, mes_1-12, año|None) o None si no encontró una fecha válida.
+    Soporta: dd-mm, dd/mm, dd mm, dd-mm-aaaa, dd sep, dd sep aaaa, etc."""
+    m = _FECHA_NUM.search(texto or "")
+    if m:
+        dia, mes, anio = m.group(1), int(m.group(2)), m.group(3)
+        if 1 <= mes <= 12:
+            return int(dia), mes, (int(anio) if anio else None)
+    m = _FECHA_NOMBRE.search(texto or "")
+    if m:
+        dia, mes_nombre, anio = m.group(1), m.group(2).lower().strip("."), m.group(3)
+        mes = MESES_ES.get(mes_nombre)
+        if mes:
+            return int(dia), mes, (int(anio) if anio else None)
+    return None
+
+
 def parsear_fecha_colombiana(texto: str) -> Optional[str]:
-    texto = texto.strip().lower()
+    texto = (texto or "").strip().lower()
     hoy = datetime.now(BOGOTA).date()
     # Fechas relativas comunes, para que respuestas como "hoy"/"ayer" no
     # tengan que pasar por la IA (evita duplicaciones del borrador).
@@ -129,21 +173,37 @@ def parsear_fecha_colombiana(texto: str) -> Optional[str]:
         if delta == 0:
             delta = 7  # si es el mismo día de la semana, se asume hace una semana
         return (hoy - timedelta(days=delta)).isoformat()
-    m = FECHA_COLOMBIANA.match(texto)
-    if not m:
+    coincidencia = _coincidencia_fecha(texto)
+    if not coincidencia:
         return None
-    dia, mes, anio = m.groups()
-    dia, mes = int(dia), int(mes)
+    dia, mes, anio = coincidencia
+    # Año por defecto: el inmediatamente en curso (si no se indicó).
     if anio is None:
-        anio = datetime.now(BOGOTA).year
-    else:
-        anio = int(anio)
-        if anio < 100:
-            anio += 2000
+        anio = hoy.year
+    elif anio < 100:
+        anio += 2000
     try:
         return date(anio, mes, dia).isoformat()
     except ValueError:
         return None
+
+
+def extraer_fecha_texto(texto: str) -> Optional[str]:
+    """Busca una fecha colombiana en cualquier línea del texto y devuelve su
+    ISO (YYYY-MM-DD), o None si no hay ninguna.
+
+    Sirve como red de seguridad: si la IA no extrajo la fecha que el usuario
+    escribió inline en un mensaje (ej. '27/08 Quemé 1354 kg...', 'Selección
+    04-09-2026' o '04 sep'), se captura de forma determinista y no cae por
+    defecto en la fecha del mensaje ('hoy')."""
+    for linea in (texto or "").split("\n"):
+        ln = linea.strip().lstrip("*-•").strip()
+        if not ln:
+            continue
+        f = parsear_fecha_colombiana(ln)
+        if f:
+            return f
+    return None
 
 
 def extraer_fecha_texto(texto: str) -> Optional[str]:
