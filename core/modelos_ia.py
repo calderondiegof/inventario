@@ -16,7 +16,7 @@ from services.inventario_service import (
 )
 from utils.parsers import (
     _limpiar_nombre_para_busqueda, _PALABRAS_CLAVE_PROCESO, _parsear_numero,
-    parsear_fecha_colombiana, parsear_material_cantidad,
+    es_nombre_merma, parsear_fecha_colombiana, parsear_material_cantidad,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,13 +112,18 @@ def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, 
     la IA duplica cantidades (material en ``items`` Y en ``merma_kg`` al
     mismo tiempo), recalculando ``merma_kg`` desde el texto.
 
+    Solo aplica a intenciones SELECCION_REVUELTO (donde el texto es una lista
+    pura de materiales). En REGISTRO_DIARIO / TRANSFORMACION_MATERIAL el texto
+    mezcla entradas/fuentes y el manejo de merma lo hace `consolidar_seleccion`
+    en el handler sobre los ítems que dejó la IA.
+
     Reglas:
+    - La basura/tierra (por nombre o por tipo MERMA) → SIEMPRE a ``merma_kg``,
+      NUNCA a items.
     - Materiales no BRUTO del catálogo → ``items`` (Resultado de selección).
     - Fuentes como 'Cooperativa', 'Pesca', etc. → se omiten.
-    - Materiales BRUTO ('Basura', 'Tierra') o nombres no reconocidos → ``merma_kg``.
-    - Solo 'basura' / 'tierra' deben permanecer en ``merma_kg``.
     """
-    if datos.get("intencion") not in ("SELECCION_REVUELTO", "REGISTRO_DIARIO", "TRANSFORMACION_MATERIAL"):
+    if datos.get("intencion") != "SELECCION_REVUELTO":
         return datos
     if not inventario:
         return datos
@@ -165,7 +170,11 @@ def _reclasificar_merma_erronea(texto: str, datos: Dict[str, Any]) -> Dict[str, 
                 _limpiar_nombre_para_busqueda(nombre)
             )
 
-        if mat and mat.tipo_material != "BRUTO":
+        # La basura/tierra (por nombre, ej. 'Basura', 'basura plastico', o por
+        # tipo MERMA del catálogo) NUNCA es material vendible: va a merma_kg.
+        if es_nombre_merma(nombre) or (mat and (mat.tipo_material or "").upper() == "MERMA"):
+            correct_merma += cantidad
+        elif mat and mat.tipo_material != "BRUTO":
             # Material comercializable → debe estar en items, NUNCA en merma.
             mat_key = normalizar(mat.nombre)
             if mat_key not in existing_keys:
