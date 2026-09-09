@@ -211,6 +211,7 @@ def prompt_agente(*, usuario: str, bodega_id: int, fecha_mensaje: str, borrador:
 
 Usuario: {usuario}; bodega: {bodega_id}; fecha local real del mensaje: {fecha_mensaje}.
 Materiales permitidos: {json.dumps(materiales, ensure_ascii=False)}.
+Sinónimos/alias del negocio (conviértelos SIEMPRE al nombre exacto del catálogo en `items`): 'grueso'→'Carter', 'lamina/laminas'→'Lamina', 'barra/barras'→'Barras', 'rechazo'→'Arreglo' (p. ej. 'rechazo grueso'→'Arreglo Carter', 'rechazo cobre'→'Arreglo Cobre y Bronce'), 'alambre'→'Cable', 'hierro'→'Acero', 'tierra'→'Basura'. Ejemplo: si el usuario vende "Grueso 7117", pon en `items` -> {{"material_nombre":"Carter","cantidad_kg":7117}}; si vende "Lamina 3032", pon {{"material_nombre":"Lamina","cantidad_kg":3032}}.
 Fuentes permitidas: {json.dumps(fuentes, ensure_ascii=False)}.
 Borrador de conversación previo: {json.dumps(borrador, ensure_ascii=False)}.
 

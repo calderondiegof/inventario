@@ -36,6 +36,25 @@ from utils.whatsapp_formatter import construir_mensaje_seleccion
 logger = logging.getLogger(__name__)
 
 
+def _normalizar_items_catalogo(datos: Dict[str, Any]) -> None:
+    """Red de seguridad: pasa cada `material_nombre` de los ítems del borrador
+    por el catálogo y lo sustituye por el NOMBRE CANÓNICO. Así, si la IA dejó
+    un sinónimo/alias ('Grueso', 'rechazo cobre', 'grueso'...) que no coincide
+    con el nombre del catálogo, el ítem NO se pierde en la orden: se registra
+    con el nombre canónico ('Carter', 'Arreglo Cobre y Bronce'...).
+
+    No omite ítems: si un nombre no resuelve a nada del catálogo, se conserva
+    tal cual (la validación final / el servicio lo reportarán con claridad)."""
+    items = datos.get("items") or []
+    for it in items:
+        nombre = it.get("material_nombre")
+        if not nombre:
+            continue
+        mat = inventario.obtener_material_por_nombre(nombre)
+        if mat:
+            it["material_nombre"] = mat.nombre
+
+
 
 def _construir_precios_items(items, precios):
     """Normaliza el dict de precios capturados al formato que espera la RPC.
@@ -772,6 +791,10 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
     # Consolidación de la selección: resolución determinista de listas (nada
     # se omite en silencio) y clasificación de merma (Basura → merma_kg).
     consolidar_seleccion(datos, texto)
+    # Red de seguridad: normalizar cada ítem a su nombre canónico del catálogo
+    # (sinónimos como 'Grueso'→'Carter', 'rechazo cobre'→'Arreglo Cobre y
+    # Bronce'). Evita que un ítem se pierda de la orden solo por el nombre.
+    _normalizar_items_catalogo(datos)
 
     cliente_existente = None
     conductor_existente = None

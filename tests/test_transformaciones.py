@@ -840,6 +840,49 @@ def test_nombre_merma_por_prefijo():
           and not any("Basura" in i["material_nombre"] for i in items))
 
 
+def test_venta_sinonimos_grueso_carter_y_lamina():
+    """Venta con sinónimos del negocio: 'Grueso 7117' NO existe en el catálogo
+    real y debe mapearse a 'Carter' (grueso→carter) para no perderse de la
+    orden; 'Lamina' y 'Plomo' se toman tal cual (existen en el catálogo).
+
+    Regression: antes, la IA omitía 'Grueso' de la orden porque el prompt solo
+    mostraba los materiales del catálogo y 'Grueso' no estaba entre ellos."""
+    fake, inv = _generar()
+    # Catálogo REAL: 'Carter' (LIMPIO) existe, 'Grueso' NO. 'Lamina' y 'Plomo' sí.
+    fake._seed("materiales", [
+        {"nombre": "Carter", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Lamina", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Plomo", "tipo_material": "LIMPIO", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    _cargar(fake, B, "Carter", 20000)
+    _cargar(fake, B, "Lamina", 5000)
+    _cargar(fake, B, "Plomo", 6000)
+    # La misma búsqueda determinista que usa consolidate_seleccion (ruta lista).
+    texto = "Venta\n* Grueso 7117\n* Lamina 3032\n* Plomo 567"
+    # NOTA: en una venta la línea 'Venta' no matchea "Material Cantidad", así
+    # que se ignora; los 3 ítems con kilos se resuelven.
+    items, no_encontrados, merma_lista = inv.resolver_lista_materiales(texto)
+    _cons("venta: ningún material omitido (grueso mapeado a Carter)",
+          no_encontrados == [])
+    _cons("venta: 3 ítems vendibles", len(items) == 3)
+    por_nombre = {i["material_nombre"]: i["cantidad_kg"] for i in items}
+    _cons("venta: Grueso→Carter 7117 (no se pierde de la orden)",
+          por_nombre.get("Carter") == 7117.0)
+    _cons("venta: Lamina 3032 y Plomo 567 presentes",
+          por_nombre.get("Lamina") == 3032.0 and por_nombre.get("Plomo") == 567.0)
+    # El helper del handler normaliza sinónimos al nombre canónico del catálogo.
+    from handlers.remisiones_handler import _normalizar_items_catalogo
+    datos = {"items": [{"material_nombre": "Grueso", "cantidad_kg": 7117},
+                       {"material_nombre": "Lamina", "cantidad_kg": 3032}]}
+    # El helper usa el singleton `inventario`; inyectamos el nuestro.
+    import handlers.remisiones_handler as _handler
+    _handler.inventario = inv
+    _normalizar_items_catalogo(datos)
+    _cons("venta: _normalizar_items_catalogo deja nombres canónicos",
+          {i["material_nombre"] for i in datos["items"]} == {"Carter", "Lamina"})
+
+
 def test_catalogo_completo_mas_de_30():
     """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
     (no está limitada a 10): con 35 registros se cargan los 35, ordenados
@@ -1333,6 +1376,7 @@ def main():
     test_extraer_fecha_inline()
     test_fecha_no_se_trata_como_material_y_formatos()
     test_nombre_merma_por_prefijo()
+    test_venta_sinonimos_grueso_carter_y_lamina()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()
