@@ -752,7 +752,11 @@ class InventarioServiceConValidacion:
         )
         if _verificar_duplicada(huella):
             return {"duplicado": True, "lote_id": None, "registros": [],
-                    "merma_kg": merma, "revuelto_descontado": total_procesado}
+                    "merma_kg": merma, "revuelto_descontado": total_procesado,
+                    "ingreso_inventario": total_resultados,
+                    "num_resultados": len(resultados_validados),
+                    "entradas": [{"fuente": f.nombre, "cantidad_kg": c} for f, c in entradas_validadas],
+                    "entrada_total": entrada_total}
         movimientos = [self._movimiento(
             usuario_id=usuario_id, bodega_id=bodega_id, material_id=revuelto.id, fuente_id=fuente.id,
             tipo=TipoTransaccion.ENTRADA_BRUTA, cantidad=cantidad, fecha=fecha, lote_id=lote_id,
@@ -776,7 +780,11 @@ class InventarioServiceConValidacion:
         registros = self._guardar_lote(movimientos, mermas)
         _registrar_huella(huella)
         return {"lote_id": lote_id, "registros": registros, "merma_kg": merma,
-                "revuelto_descontado": total_procesado}
+                "revuelto_descontado": total_procesado,
+                "ingreso_inventario": total_resultados,
+                "num_resultados": len(resultados_validados),
+                "entradas": [{"fuente": f.nombre, "cantidad_kg": c} for f, c in entradas_validadas],
+                "entrada_total": entrada_total}
 
     def registrar_transformacion_material(
             self, *, bodega_id: int, usuario_id: int, fecha_operacion: str,

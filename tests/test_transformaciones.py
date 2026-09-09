@@ -883,6 +883,97 @@ def test_venta_sinonimos_grueso_carter_y_lamina():
           {i["material_nombre"] for i in datos["items"]} == {"Carter", "Lamina"})
 
 
+def test_registro_diario_basura_va_a_merma_no_a_movimientos():
+    """Registro diario (entrada de Revuelto + selección) con Basura: la basura
+    debe ir a MERMA y NUNCA quedar en movimientos como material vendible ni como
+    merma de 9 kg errónea.
+
+    Regression: antes `consolidar_seleccion` solo aplicaba a SELECCION_REVUELTO,
+    por lo que en REGISTRO_DIARIO la basura (1010) quedaba en `items`/movimientos
+    y la merma quedaba en el valor (erróneo) que ponía la IA (9.00)."""
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Grueso", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Lamina", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Olla", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Cobre", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Carter", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Bronce", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Radiador", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Cable", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Arreglo Cobre y Bronce", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+        {"nombre": "Plomo", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Basura", "tipo_material": "MERMA", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    fake._seed("fuentes_origen", [
+        {"nombre": "Cooperativa", "tipo_fuente": "EXTERNA_REVUELTO"},
+    ])
+    inv.recargar_catalogos()
+    # Stock previo de Revuelto (en producción había saldo de días anteriores):
+    # la entrada del día (3135) no cubre el descuento (2343 + 1010 = 3353).
+    _cargar(fake, B, "Revuelto", 300)
+    # Ruta REAL de main.py: la IA deja los items (con Basura 1010 dentro) y
+    # consolidate_seleccion debe separarla a merma en cualquier intención.
+    from handlers.remisiones_handler import consolidar_seleccion
+    import handlers.remisiones_handler as _handler
+    _handler.inventario = inv
+    items_ia = [
+        {"material_nombre": "Grueso", "cantidad_kg": 1084},
+        {"material_nombre": "Lamina", "cantidad_kg": 329},
+        {"material_nombre": "Olla", "cantidad_kg": 297},
+        {"material_nombre": "Cobre", "cantidad_kg": 5},
+        {"material_nombre": "Bronce", "cantidad_kg": 20},
+        {"material_nombre": "Radiador", "cantidad_kg": 300},
+        {"material_nombre": "Cable", "cantidad_kg": 244},
+        {"material_nombre": "Arreglo Cobre y Bronce", "cantidad_kg": 33},
+        {"material_nombre": "Plomo", "cantidad_kg": 31},
+        {"material_nombre": "Basura", "cantidad_kg": 1010},
+    ]
+    datos = {"intencion": "REGISTRO_DIARIO", "items": items_ia,
+             "entradas_revuelto": [{"fuente_nombre": "Cooperativa", "cantidad_kg": 3135}],
+             "merma_kg": 9.0}  # la IA puso 9 erróneo
+    texto = "08-09\nCooperativa 3135\nSelección\n* Grueso 1084\n... * Basura 1010"
+    consolidar_seleccion(datos, texto)
+    _cons("reg diario: 9 materiales vendibles (basura separada)", len(datos["items"]) == 9)
+    _cons("reg diario: la basura 1010 NO está en items",
+          not any(i["material_nombre"] == "Basura" for i in datos["items"]))
+    # La merma de la IA (9) se DESCARTA porque la basura está en items:
+    # la lista es la fuente de verdad -> merma = 1010 (no 9+1010=1019).
+    _cons("reg diario: merma = 1010 (la '9' errónea de la IA se descarta)",
+          abs(datos["merma_kg"] - 1010.0) < 0.01)
+    # Registrar: descuento de Revuelto = resultados + merma = 2343 + 1010 = 3353.
+    r = inv.registrar_registro_diario(
+        bodega_id=B, usuario_id=9, fecha_operacion="2026-09-08",
+        entradas=datos["entradas_revuelto"], resultados=datos["items"],
+        merma_kg=datos["merma_kg"],
+    )
+    _cons("reg diario: merma registrada = 1010 (no 9 ni 1019)",
+          abs(r["merma_kg"] - 1010.0) < 0.01)
+    _cons("reg diario: ingreso inventario = 2343 (sin basura)",
+          abs(r["ingreso_inventario"] - 2343.0) < 0.01)
+    _cons("reg diario: total descontado revuelto = 3353 (2343 + 1010)",
+          abs(r["revuelto_descontado"] - 3353.0) < 0.01)
+    _cons("reg diario: entrada total = 3135", abs(r["entrada_total"] - 3135.0) < 0.01)
+    _cons("reg diario: 9 resultados", r["num_resultados"] == 9)
+    _cons("reg diario: saldo de Basura en movimientos = 0",
+          abs(_saldo(fake, B, "Basura")) < 0.01)
+    _cons("reg diario: merma en mermas_proceso = 1010",
+          abs(_merma_total(fake, B) - 1010.0) < 0.01)
+    # Mensaje en DOS bloques (dos tipos de movimiento): Revuelto + Selección.
+    from utils.whatsapp_formatter import construir_mensaje_registro_diario
+    msg = construir_mensaje_registro_diario(r, "08-09-2026")
+    _cons("reg diario msg: bloque Revuelto con 1 fuente y 3,135.00 kg",
+          "Registro de Revuelto registrada: 1 fuente(s), total 3,135.00 kg, fecha 08-09-2026." in msg)
+    _cons("reg diario msg: bloque Selección con merma 1,010.00",
+          "merma 1,010.00 kg" in msg)
+    _cons("reg diario msg: bloque Selección con ingreso 2,343.00",
+          "ingreso inventario: 2,343.00 kg" in msg)
+    _cons("reg diario msg: bloque Selección con descuento -3,353.00",
+          "total descontado revuelto: -3,353.00 kg" in msg)
+    _cons("reg diario msg: dos bloques separados", len(msg.split("\n\n")) == 2)
+
+
 def test_catalogo_completo_mas_de_30():
     """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
     (no está limitada a 10): con 35 registros se cargan los 35, ordenados

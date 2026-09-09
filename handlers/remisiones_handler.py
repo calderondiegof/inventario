@@ -31,7 +31,7 @@ from utils.parsers import (
     parsear_campos_cliente, parsear_campos_cliente_venta, parsear_fecha_colombiana,
     parsear_material_cantidad,
 )
-from utils.whatsapp_formatter import construir_mensaje_seleccion
+from utils.whatsapp_formatter import construir_mensaje_seleccion, construir_mensaje_registro_diario
 
 logger = logging.getLogger(__name__)
 
@@ -238,52 +238,65 @@ async def iniciar_aprobacion_orden_salida(telefono: str, usuario_id: int,
         [(o["numero"], o["numero"]) for o in ordenes[:3]],
     )
 def consolidar_seleccion(datos: Dict[str, Any], texto: str) -> None:
-    """Post-procesado del borrador de SELECCION_REVUELTO (muta `datos`):
+    """Post-procesado del borrador de selección/transformación (muta `datos`):
 
-    1. Si el mensaje del usuario es una LISTA de materiales (viñetas o líneas
-       'Material Cantidad'), se resuelve de forma DETERMINISTA con
-       resolver_lista_materiales: cada línea se consume una vez y los ítems no
-       encontrados se reportan en datos['materiales_omitidos'] (nada se
-       omite en silencio, evitando que la IA simplifique/recorte frases).
-    2. Clasificación de merma: cualquier item cuyo material sea de tipo MERMA
-       (ej. 'Basura') se mueve a merma_kg — la basura nunca se registra como
-       material comercializable.
+    1. Si el mensaje es una LISTA de materiales (viñetas o líneas
+       'Material Cantidad') y la intención es SELECCION_REVUELTO, se resuelve
+       de forma DETERMINISTA con resolver_lista_materiales: cada línea se
+       consume una vez y los ítems no encontrados se reportan en
+       datos['materiales_omitidos']. NO se aplica a REGISTRO_DIARIO /
+       TRANSFORMACION_MATERIAL porque ahí el texto mezcla entradas/fuentes
+       (ej. 'Cooperativa 3135') y volver a resolverlo con el patrón
+       material-cantidad generaría omisiones falsas.
+
+    2. Clasificación de merma (SIEMPRE, para cualquier intención): cualquier
+       ítem cuyo nombre EMPIECE con 'basura'/'tierra' (ej. 'Basura', 'basura
+       plastico', 'basura tierra'...), o que sea un material MERMA del
+       catálogo, se mueve a `merma_kg` y JAMÁS se registra como material
+       vendible. Esto aplica tanto a lo que devuelve la IA como a lo que
+       re-resuelve la ruta determinista.
 
     Debe llamarse con contexto de catálogo cargado (inventario.catalogo_materiales).
     """
-    if datos.get("intencion") != "SELECCION_REVUELTO":
-        return
     omitidos: List[str] = []
-    if es_lista_materiales(texto):
+    if datos.get("intencion") == "SELECCION_REVUELTO" and es_lista_materiales(texto):
         items, no_encontrados, merma_lista = inventario.resolver_lista_materiales(texto)
         datos["items"] = items
-        # La merma se RECALCULA solo desde las líneas que SÍ se resolvieron como
-        # material MERMA del catálogo (basura/tierra). NO se conserva ni se suma
-        # la merma que la IA pudiera haber inferido, porque esa puede incluir
-        # materiales no registrables (omitidos) que NO son merma real: un material
-        # que no se registra no puede descontarse ni de la merma ni del Revuelto.
-        datos["merma_kg"] = merma_lista
-        # Se descarta la `cantidad_revuelto_procesada` que pudiera traer la IA:
-        # si incluyera los omitidos, descontaría de más del Revuelto. El servicio
-        # la recalcula como resultados + merma (solo lo realmente registrado).
-        datos["cantidad_revuelto_procesada"] = None
+        # La lista determinista es la fuente de verdad: si trae merma (líneas
+        # basura/tierra), REEMPLAZA la merma que trajera la IA — esa proviene
+        # de las MISMAS líneas y sumarla duplica (o mete valores erróneos,
+        # ej. el 'merma 9' que la IA inventó para la entrada del 08-09).
+        if merma_lista > 0:
+            datos["merma_kg"] = merma_lista
+            datos["cantidad_revuelto_procesada"] = None
         omitidos = list(no_encontrados)
-    else:
-        # Ruta IA: separar items de tipo MERMA hacia merma_kg.
+    # Clasificación de merma común SOLO para intenciones de selección/
+    # transformación (jamás para ventas/compras): basura/tierra por nombre o
+    # por tipo MERMA -> merma_kg. La basura NUNCA entra al inventario.
+    if datos.get("intencion") in ("SELECCION_REVUELTO", "REGISTRO_DIARIO", "TRANSFORMACION_MATERIAL"):
         items = datos.get("items") or []
         vendibles: List[Dict[str, Any]] = []
+        merma_items = 0.0
+        hay_merma_en_items = False
         for it in items:
             mat = inventario.obtener_material_por_nombre(it.get("material_nombre") or "")
-            # Merma por NOMBRE o por tipo: comienza con 'basura'/'tierra' o es
-            # un material MERMA del catálogo. Nunca se suma al inventario.
             if es_nombre_merma(it.get("material_nombre")) or (
                 mat and (mat.tipo_material or "").upper() == "MERMA"
             ):
-                datos["merma_kg"] = float(datos.get("merma_kg") or 0) + float(it.get("cantidad_kg") or 0)
+                merma_items += float(it.get("cantidad_kg") or 0)
+                hay_merma_en_items = True
             else:
                 vendibles.append(it)
+        if hay_merma_en_items:
+            # Los ítems de basura/tierra son la fuente de verdad de la merma:
+            # REEMPLAZAN la merma_kg de la IA (misma causa: doble conteo o
+            # valores alucinados). Se anula cantidad_revuelto_procesada para
+            # que el servicio recalcule el descuento como resultados + merma.
+            datos["merma_kg"] = merma_items
+            datos["cantidad_revuelto_procesada"] = None
         datos["items"] = vendibles
-    datos["materiales_omitidos"] = omitidos
+    if omitidos:
+        datos["materiales_omitidos"] = omitidos
 async def regenerar_y_enviar_pdf_remision(telefono: str, bodega_id: int, numero: str) -> str:
     """Regenera el PDF de una remisión EXISTENTE conservando el mismo número
     correlativo (no se genera uno nuevo) y lo envía por WhatsApp.
@@ -862,7 +875,7 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
             r = await asyncio.to_thread(inventario.registrar_registro_diario, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, entradas=datos.get("entradas_revuelto", []), resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
             salida = (f"⚠️ Registro diario duplicado detectado; ya se había guardado hace instantes (merma {r['merma_kg']:,.2f} kg, fecha {fecha})."
                       if r.get("duplicado") else
-                      f"Registro diario guardado: {len(r['registros'])} movimientos y merma de {r['merma_kg']:,.2f} kg, fecha {fecha}.")
+                      construir_mensaje_registro_diario(r, fecha))
         elif intencion == "ENTRADA_REVUELTO":
             r = await asyncio.to_thread(inventario.registrar_entrada_revuelto, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, entradas=datos.get("entradas_revuelto", []))
             salida = f"Entrada de Revuelto registrada: {len(r['registros'])} fuente(s), fecha {fecha}."

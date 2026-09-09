@@ -52,6 +52,41 @@ def _formatear_ficha_conductor(p: Dict[str, Any]) -> str:
     ) if p.get("nombre") or p.get("nombre_conductor") else ""
 
 
+def construir_mensaje_registro_diario(resultado: Dict[str, Any], fecha: str) -> str:
+    """Mensaje de confirmación del REGISTRO_DIARIO en DOS bloques, uno por
+    tipo de movimiento registrado (entrada de Revuelto + selección):
+
+        📦 Registro de Revuelto registrada: 1 fuente(s), total 3,135.00 kg, fecha 2026-09-08.
+
+        ✅ Selección registrada: 9 resultado(s), merma 1,010.00 kg, ingreso
+        inventario: 2,343.00 kg, total descontado revuelto: -3,353.00 kg, ...
+
+    El bloque de selección reutiliza EXACTAMENTE el formato ya definido para
+    la selección (merma / ingreso inventario / total descontado), de modo que
+    la merma (basura) nunca se lee como un doble descuento: ya está incluida
+    en el total descontado del Revuelto.
+    """
+    partes: List[str] = []
+    entradas = resultado.get("entradas") or []
+    if entradas:
+        partes.append(
+            f"📦 Registro de Revuelto registrada: {len(entradas)} fuente(s), "
+            f"total {float(resultado.get('entrada_total') or 0):,.2f} kg, fecha {fecha}."
+        )
+    num_resultados = int(resultado.get("num_resultados") or 0)
+    merma = float(resultado.get("merma_kg") or 0)
+    ingreso = float(resultado.get("ingreso_inventario") or 0)
+    descontado = float(resultado.get("revuelto_descontado") or 0)
+    partes.append(
+        f"✅ Selección registrada: {num_resultados} resultado(s), "
+        f"merma {merma:,.2f} kg, "
+        f"ingreso inventario: {ingreso:,.2f} kg, "
+        f"total descontado revuelto: -{descontado:,.2f} kg, "
+        f"fecha {fecha}."
+    )
+    return "\n\n".join(partes)
+
+
 def construir_mensaje_seleccion(
     resultado: Dict[str, Any],
     fecha: str,
