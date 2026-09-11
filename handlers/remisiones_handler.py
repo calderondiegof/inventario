@@ -17,8 +17,8 @@ from core.modelos_ia import inferir_datos_ia, validar_completitud
 from generador_pdf import generar_remision_pdf_archivo
 from handlers import MANEJADO
 from handlers.consultas_handler import (
-    enviar_reporte_diario, iniciar_inventario_total, iniciar_reporte_por_fecha,
-    pedir_movimientos_material,
+    enviar_inventario_total, enviar_reporte_diario, iniciar_inventario_total,
+    iniciar_reporte_por_fecha, pedir_movimientos_material,
 )
 from services.currency_service import obtener_tasa_dolar
 from services.inventario_service import (
@@ -869,7 +869,12 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
                 saldos = inventario.obtener_saldos_bodega(bodega_id)
                 salida = "\n".join(["Inventario actual:"] + [f"- {x['material']}: {x['saldo_kg']} kg" for x in saldos])
         elif intencion == "CONSULTA_INVENTARIO_TOTAL":
-            await iniciar_inventario_total(telefono, usuario_id, contexto)
+            # Respuesta directa en TEXTO (sin menú de texto/gráfico): el usuario
+            # pidió "inventario total"/"ver todo el inventario" en lenguaje
+            # natural y lo más rápido es devolver la lista de saldos. El menú de
+            # texto/gráfico queda accesible SOLO por la ruta de botones
+            # (`inv_total` → `inv_txt`/`inv_graf` en router.py).
+            await enviar_inventario_total(telefono, bodega_id)
             return MANEJADO
         elif intencion == "VER_MOVIMIENTOS_SELECCION":
             await pedir_movimientos_material(telefono, usuario_id, contexto)
