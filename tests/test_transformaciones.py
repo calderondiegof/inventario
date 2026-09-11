@@ -1161,6 +1161,51 @@ def test_grafico_otros_max_10():
           len(out8) == 8 and not out8["material"].str.startswith("Otros (").any())
 
 
+def test_grafico_entradas_vs_salidas_agrupacion():
+    """Gráfico de entradas vs salidas: la función pura `_agrupar_entradas_salidas`
+    clasifica kg>=0 como entrada y |kg| para kg<0 como salida, agrupa por
+    material, descarta saldos netos en cero y ordena de mayor a menor."""
+    from reporte_grafico import _agrupar_entradas_salidas
+
+    def _mov(material, cantidad):
+        return {"materiales": {"nombre": material}, "cantidad_kg": cantidad}
+
+    # Mezcla de entradas y salidas del mismo material (Cobre: entra 500, sale 150)
+    # + un material solo de entrada (Carter) y otro solo de salida (Cable).
+    datos = [
+        _mov("Cobre", 500.0),
+        _mov("Cobre", -150.0),
+        _mov("Carter", 1200.0),
+        _mov("Cable", -90.0),
+    ]
+    agrupados = _agrupar_entradas_salidas(datos)
+
+    map_material = {g["material"]: g for g in agrupados}
+    _cons("entr/sal: Cobre suma entradas 500 y salidas 150",
+          abs(map_material["Cobre"]["entradas"] - 500.0) < 0.01
+          and abs(map_material["Cobre"]["salidas"] - 150.0) < 0.01)
+    _cons("entr/sal: Carter solo entrada 1200, sin salidas",
+          abs(map_material["Carter"]["entradas"] - 1200.0) < 0.01
+          and map_material["Carter"]["salidas"] == 0.0)
+    _cons("entr/sal: Cable solo salida 90, sin entradas",
+          abs(map_material["Cable"]["salidas"] - 90.0) < 0.01
+          and map_material["Cable"]["entradas"] == 0.0)
+
+    # Orden: de mayor movimiento (entrada o salida) a menor → Carter (1200) primero.
+    _cons("entr/sal: ordenado de mayor a menor por movimiento",
+          [g["material"] for g in agrupados] == ["Carter", "Cobre", "Cable"])
+
+    # Material con entradas y salidas que se cancelan → se descarta del gráfico.
+    datos_cero = datos + [_mov("Bronce", 100.0), _mov("Bronce", -100.0)]
+    agrupados_cero = _agrupar_entradas_salidas(datos_cero)
+    _cons("entr/sal: material neto en cero es descartado",
+          "Bronce" not in [g["material"] for g in agrupados_cero])
+
+    # Sin datos → lista vacía.
+    _cons("entr/sal: sin movimientos devuelve lista vacía",
+          _agrupar_entradas_salidas([]) == [])
+
+
 def test_captura_precios_correccion_y_edicion():
     """Flujo de captura de precios de Remisión:
     - '0' en el paso a paso descarta el precio del material ANTERIOR y lo vuelve

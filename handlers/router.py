@@ -16,7 +16,8 @@ from handlers import clientes_handler, conductores_handler, materiales_handler
 from handlers import remisiones_handler
 from handlers import pdf_handler
 from handlers.consultas_handler import (
-    enviar_grafico_inventario, enviar_inventario_total, enviar_reporte_diario,
+    enviar_grafico_inventario, enviar_grafico_movimientos_dia,
+    enviar_inventario_total, enviar_reporte_diario,
     iniciar_inventario_total, iniciar_reporte_por_fecha,
     pedir_movimientos_material,
 )
@@ -464,6 +465,17 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
     if texto_normalizado in {"reporte de ayer", "reporte ayer", "ver reporte de ayer"}:
         await enviar_reporte_diario(telefono, bodega_id, message, dias_atras=1)
+        return
+    # Gráfico de ENTRADAS vs SALIDAS del día (barras por material).
+    if texto_normalizado in {
+        "grafico movimientos", "grafico de movimientos", "movimientos grafico",
+        "movimientos del dia grafico", "entradas vs salidas", "entradas y salidas",
+        "grafico entradas salidas", "grafico del dia", "grafico de hoy",
+    }:
+        await enviar_grafico_movimientos_dia(telefono, bodega_id, message)
+        return
+    if texto_normalizado in {"grafico movimientos ayer", "movimientos ayer grafico"}:
+        await enviar_grafico_movimientos_dia(telefono, bodega_id, message, dias_atras=1)
         return
         
 

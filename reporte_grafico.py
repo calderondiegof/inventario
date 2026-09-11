@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - fallback de compat
         lambda *_a, **_k: None
     )
 from dotenv import load_dotenv
+from typing import Any, Dict, List
 
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -174,6 +175,115 @@ def generar_y_subir_grafico_stock(bodega_id: int) -> str:
 
     except Exception as e:
         print(f"❌ [DASHBOARD ERROR]: {type(e).__name__} - {e}")
+        return None
+    finally:
+        if fig:
+            plt.close(fig)
+        plt.close("all")
+
+
+def _agrupar_entradas_salidas(datos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Agrupa movimientos de un día por material: entradas (kg>=0) y salidas
+    (|kg| para kg<0). Devuelve lista ordenada (de mayor a menor movimiento)
+    solo con materiales que tengan algún movimiento neto distinto de cero."""
+    totales: Dict[str, Dict[str, float]] = {}
+    for fila in datos:
+        material = (fila.get("materiales") or {}).get("nombre", "Desconocido")
+        cantidad = float(fila.get("cantidad_kg") or 0.0)
+        bucket = totales.setdefault(material, {"entradas": 0.0, "salidas": 0.0})
+        if cantidad >= 0:
+            bucket["entradas"] += cantidad
+        else:
+            bucket["salidas"] += abs(cantidad)
+
+    # Solo materiales con algún movimiento neto distinto de cero, ordenados del
+    # de mayor movimiento (entrada o salida) al menor.
+    materiales = sorted(
+        (m for m, b in totales.items()
+         if round(b["entradas"], 2) or round(b["salidas"], 2)),
+        key=lambda m: -max(totales[m]["entradas"], totales[m]["salidas"]),
+    )
+    return [
+        {"material": m, "entradas": totales[m]["entradas"],
+         "salidas": totales[m]["salidas"]}
+        for m in materiales
+    ]
+
+
+def generar_y_subir_grafico_movimientos_dia(bodega_id: int, fecha: str) -> str:
+    """Genera y sube el gráfico de ENTRADAS vs SALIDAS de una bodega en un día.
+
+    Regla usada (libro mayor): cantidad_kg > 0 = entrada, cantidad_kg < 0 =
+    salida. Se agrupa por material y se dibujan barras horizontales
+    apareadas: verde = entradas, rojo = salidas (valores absolutos).
+    Devuelve la URL pública, o None si no hay movimientos o hay error.
+    """
+    fig = None
+    try:
+        print(f"--> [ENTR/SAL] 1. Consultando movimientos del día {fecha} para bodega {bodega_id}...")
+        res = (
+            supabase.table("movimientos_inventario")
+            .select("tipo_movimiento,cantidad_kg,materiales(nombre)")
+            .eq("bodega_id", bodega_id)
+            .eq("fecha_operacion", fecha)
+            .execute()
+        )
+        datos = res.data or []
+        if not datos:
+            print(f"⚠️ [ENTR/SAL] No hay movimientos el {fecha} en bodega {bodega_id}.")
+            return None
+
+        print(f"--> [ENTR/SAL] 2. Procesando {len(datos)} registros...")
+        agrupados = _agrupar_entradas_salidas(datos)
+        if not agrupados:
+            print(f"⚠️ [ENTR/SAL] Movimientos encontrados pero todos en cero.")
+            return None
+
+        materiales = [g["material"] for g in agrupados]
+        entradas = [g["entradas"] for g in agrupados]
+        salidas = [g["salidas"] for g in agrupados]
+        y = list(range(len(materiales)))
+        alto_fig = max(5.5, len(materiales) * 0.5 + 1.5)
+
+        fig, ax = plt.subplots(figsize=(10, alto_fig))
+        ax.barh(y, entradas, height=0.4, color="#2ca02c", label="Entradas (kg)")
+        ax.barh([pos + 0.4 for pos in y], salidas, height=0.4, color=COLOR_NEGATIVO,
+                label="Salidas (kg)")
+        ax.set_yticks([pos + 0.2 for pos in y])
+        ax.set_yticklabels(materiales, fontsize=max(8, 11 - max(0, len(materiales) - 12)))
+        ax.invert_yaxis()
+        ax.set_xlabel("Kilogramos (kg)", fontsize=10)
+        ax.set_title(f"📊 Movimientos del día {fecha} — Bodega #{bodega_id}",
+                     fontsize=13, fontweight="bold")
+        ax.legend(loc="lower right", fontsize=9, frameon=False)
+        ax.grid(axis="x", linestyle="--", alpha=0.4)
+        ax.set_axisbelow(True)
+        for pos, ent, sal in zip(y, entradas, salidas):
+            maxv = max(ent, sal) * 0.02
+            if ent:
+                ax.text(ent + maxv, pos, f"{ent:,.0f}", va="center", fontsize=8, color="#1e7a1e")
+            if sal:
+                ax.text(sal + maxv, pos + 0.4, f"{sal:,.0f}", va="center", fontsize=8, color=COLOR_NEGATIVO)
+
+        plt.tight_layout()
+        img_buffer = io.BytesIO()
+        plt.savefig(img_buffer, format="png", dpi=150, bbox_inches="tight")
+        img_buffer.seek(0)
+
+        print("--> [ENTR/SAL] 3. Subiendo imagen a Supabase Storage...")
+        bucket_name = "reportes"
+        nombre_archivo_remote = f"entradas_salidas_b{bodega_id}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.png"
+        supabase.storage.from_(bucket_name).upload(
+            file=img_buffer.getvalue(),
+            path=nombre_archivo_remote,
+            file_options={"content-type": "image/png", "x-upsert": "true"}
+        )
+        url_publica = supabase.storage.from_(bucket_name).get_public_url(nombre_archivo_remote)
+        print("✅ [ENTR/SAL] Proceso completado exitosamente.")
+        return url_publica
+
+    except Exception as e:
+        print(f"❌ [ENTR/SAL ERROR]: {type(e).__name__} - {e}")
         return None
     finally:
         if fig:

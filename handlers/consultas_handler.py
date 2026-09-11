@@ -1,15 +1,16 @@
 """Handler de consultas: reportes diarios, graficos, inventario total y movimientos."""
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from core.config import inventario
-from core.contexto import guardar_contexto
+from core.contexto import fecha_local_mensaje, guardar_contexto
 from core.whatsapp import (
     enviar_botones_whatsapp, enviar_imagen_whatsapp, enviar_lista_whatsapp,
     enviar_mensaje_whatsapp,
 )
-from reporte_grafico import generar_y_subir_grafico_stock
+from reporte_grafico import generar_y_subir_grafico_movimientos_dia, generar_y_subir_grafico_stock
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,24 @@ async def enviar_grafico_inventario(telefono: str, bodega_id: int) -> None:
         await enviar_imagen_whatsapp(telefono, url, f"Inventario de la bodega {bodega_id}")
     else:
         await enviar_mensaje_whatsapp(telefono, "No hay datos para generar el gráfico.")
+
+
+async def enviar_grafico_movimientos_dia(telefono: str, bodega_id: int,
+                                         message: Dict[str, Any], dias_atras: int = 0,
+                                         fecha: Optional[str] = None) -> None:
+    """Genera y envía el gráfico de ENTRADAS vs SALIDAS del día (barras por material).
+    dias_atras=0 → 'hoy', 1 → 'ayer'. Si se pasa `fecha` (ISO) se usa esa fecha
+    explícita."""
+    if not fecha:
+        fecha = fecha_local_mensaje(message)
+        if dias_atras:
+            fecha = (datetime.fromisoformat(fecha).date() - timedelta(days=dias_atras)).isoformat()
+    url = await asyncio.to_thread(generar_y_subir_grafico_movimientos_dia, bodega_id, fecha)
+    if url:
+        await enviar_imagen_whatsapp(telefono, url, f"Movimientos del día {fecha}")
+    else:
+        await enviar_mensaje_whatsapp(
+            telefono, f"No hay movimientos registrados el {fecha} para graficar.")
 
 
 async def iniciar_inventario_total(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:

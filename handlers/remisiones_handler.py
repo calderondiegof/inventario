@@ -17,8 +17,9 @@ from core.modelos_ia import inferir_datos_ia, validar_completitud
 from generador_pdf import generar_remision_pdf_archivo
 from handlers import MANEJADO
 from handlers.consultas_handler import (
-    enviar_inventario_total, enviar_reporte_diario, iniciar_inventario_total,
-    iniciar_reporte_por_fecha, pedir_movimientos_material,
+    enviar_grafico_movimientos_dia, enviar_inventario_total,
+    enviar_reporte_diario, iniciar_inventario_total, iniciar_reporte_por_fecha,
+    pedir_movimientos_material,
 )
 from services.currency_service import obtener_tasa_dolar
 from services.inventario_service import (
@@ -881,10 +882,20 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
             return MANEJADO
         elif intencion == "REPORTE_POR_FECHA":
             fecha_rep = datos.get("fecha_operacion")
+            # Si el usuario pidió "gráfico"/"grafica", se envía el gráfico de
+            # entradas vs salidas en lugar del reporte de texto.
+            quiere_grafico = "grafic" in texto_normalizado
             if fecha_rep:
-                await enviar_reporte_diario(telefono, bodega_id, message, fecha=str(fecha_rep))
+                if quiere_grafico:
+                    await enviar_grafico_movimientos_dia(telefono, bodega_id, message,
+                                                         fecha=str(fecha_rep))
+                else:
+                    await enviar_reporte_diario(telefono, bodega_id, message, fecha=str(fecha_rep))
             else:
-                await iniciar_reporte_por_fecha(telefono, usuario_id, contexto)
+                if quiere_grafico:
+                    await enviar_grafico_movimientos_dia(telefono, bodega_id, message)
+                else:
+                    await iniciar_reporte_por_fecha(telefono, usuario_id, contexto)
             return MANEJADO
         elif intencion == "REGISTRO_DIARIO":
             r = await asyncio.to_thread(inventario.registrar_registro_diario, bodega_id=bodega_id, usuario_id=usuario_id, fecha_operacion=fecha, entradas=datos.get("entradas_revuelto", []), resultados=datos.get("items", []), merma_kg=datos.get("merma_kg", 0), cantidad_revuelto_procesada=datos.get("cantidad_revuelto_procesada"))
