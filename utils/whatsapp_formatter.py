@@ -77,13 +77,16 @@ def construir_mensaje_registro_diario(resultado: Dict[str, Any], fecha: str) -> 
     merma = float(resultado.get("merma_kg") or 0)
     ingreso = float(resultado.get("ingreso_inventario") or 0)
     descontado = float(resultado.get("revuelto_descontado") or 0)
-    partes.append(
-        f"✅ Selección registrada: {num_resultados} resultado(s), "
-        f"merma {merma:,.2f} kg, "
-        f"ingreso inventario: {ingreso:,.2f} kg, "
-        f"total descontado revuelto: -{descontado:,.2f} kg, "
-        f"fecha {fecha}."
-    )
+    # ENTRADA PURA (sin selección): num_resultados 0, merma 0 y descontado 0 →
+    # no se agrega el bloque de selección (un "0 resultado(s)... -0" es ruido).
+    if num_resultados or merma or descontado:
+        partes.append(
+            f"✅ Selección registrada: {num_resultados} resultado(s), "
+            f"merma {merma:,.2f} kg, "
+            f"ingreso inventario: {ingreso:,.2f} kg, "
+            f"total descontado revuelto: -{descontado:,.2f} kg, "
+            f"fecha {fecha}."
+        )
     return "\n\n".join(partes)
 
 

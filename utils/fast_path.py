@@ -63,6 +63,14 @@ _RE_FUENTE_KG = re.compile(
 
 _MERMA_KEYS = {"merma", "merma kg", "merma_kg", "basura kg"}
 
+# Encabezado CON sufijo: 'Venta # 2', 'venta 3', 'orden de salida #5',
+# 'seleccion del 10-09'. El prefijo (clave de _INTENCIONES_ENCABEZADO) seguido
+# de cualquier cosa corta que no parezca 'Material Cantidad' de un ítem.
+_RE_ENCABEZADO_PREFIJO = re.compile(
+    r"^(" + "|".join(sorted(map(re.escape, _INTENCIONES_ENCABEZADO), key=len, reverse=True))
+    + r")\b(?:\s+(?:#|nro\.?|no\.?|n°|\d|del\b).*)?$"
+)
+
 
 def _limpiar_linea(linea: str) -> str:
     ln = (linea or "").strip()
@@ -127,6 +135,15 @@ def intentar_fast_path(texto: str, inventario, borrador: Optional[Dict[str, Any]
         ln_norm = normalizar(ln)
         # 1) Encabezados de bloque: fijan la intención si aún no hay una.
         intencion_hdr = _INTENCIONES_ENCABEZADO.get(ln_norm)
+        if not intencion_hdr:
+            # Encabezado con sufijo: 'Venta # 2', 'Venta 3', 'Orden de salida
+            # #5', 'Selección del 10-09'... El prefijo conocido fija la
+            # intención y el resto (número de remisión, etc.) se ignora. Sin
+            # esto, el parser genérico tomaría la línea como un MATERIAL
+            # ('Venta #' con 2 kg) y fallaría el registro.
+            m_hdr = _RE_ENCABEZADO_PREFIJO.match(ln_norm)
+            if m_hdr:
+                intencion_hdr = _INTENCIONES_ENCABEZADO[m_hdr.group(1)]
         if intencion_hdr:
             if intencion is None:
                 intencion = intencion_hdr

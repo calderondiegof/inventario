@@ -974,6 +974,51 @@ def test_registro_diario_basura_va_a_merma_no_a_movimientos():
     _cons("reg diario msg: dos bloques separados", len(msg.split("\n\n")) == 2)
 
 
+def test_registro_diario_entrada_pura():
+    """Entrada PURA de Revuelto (solo fuentes, sin selección): el caso real
+    'Material del 10/09\\n* Cooperativa 3686\\n* Pesca 2172' se preguntaba
+    'Indica los materiales...' porque validar_completitud exigía items siempre.
+    Una entrada sin selección es válida: se registran las fuentes y NO se
+    genera el movimiento de salida de Revuelto (ni un -0 kg de ruido)."""
+    fake, inv = _generar()  # ya incluye 'Revuelto' (BRUTO) en el catálogo
+    fake._seed("fuentes_origen", [
+        {"nombre": "Cooperativa", "tipo_fuente": "EXTERNA_REVUELTO"},
+        {"nombre": "Pesca", "tipo_fuente": "EXTERNA_REVUELTO"},
+    ])
+    inv.recargar_catalogos()
+    # 1) validar_completitud: con entradas y SIN items NO debe pedir materiales.
+    from core.modelos_ia import validar_completitud
+    datos = {"intencion": "REGISTRO_DIARIO",
+             "entradas_revuelto": [{"fuente_nombre": "Cooperativa", "cantidad_kg": 3686},
+                                   {"fuente_nombre": "Pesca", "cantidad_kg": 2172}],
+             "fecha_operacion": "2026-09-10"}
+    _cons("entrada pura: NO pide materiales si hay fuentes",
+          validar_completitud(dict(datos), "2026-09-11") is None)
+    datos_sin_entradas = {"intencion": "REGISTRO_DIARIO", "fecha_operacion": "2026-09-10"}
+    res = validar_completitud(datos_sin_entradas, "2026-09-11")
+    _cons("reg diario sin nada: SÍ pide fuentes (primero lo primero)",
+          res is not None and res[1] == "entradas_revuelto")
+    # Regresión: COMPRA_DIRECTA / VENTA siguen exigiendo items.
+    res_c = validar_completitud({"intencion": "COMPRA_DIRECTA", "fecha_operacion": "2026-09-10"}, "2026-09-11")
+    _cons("regresión: COMPRA_DIRECTA sin items sigue pidiéndolos",
+          res_c is not None and res_c[1] == "items")
+    # 2) Registro de la entrada pura: solo entradas, sin movimiento -0.
+    r = inv.registrar_registro_diario(
+        bodega_id=B, usuario_id=7, fecha_operacion="2026-09-10",
+        entradas=datos["entradas_revuelto"], resultados=[], merma_kg=0)
+    _cons("entrada pura: entrada_total = 5858", abs(r["entrada_total"] - 5858.0) < 0.01)
+    _cons("entrada pura: 0 resultados", r["num_resultados"] == 0)
+    movs = fake._tables["movimientos_inventario"]
+    _cons("entrada pura: solo 2 movimientos (sin salida -0 de Revuelto)", len(movs) == 2)
+    _cons("entrada pura: Revuelto suma 5858", abs(_saldo(fake, B, "Revuelto") - 5858.0) < 0.01)
+    # 3) Mensaje: solo el bloque de Revuelto, sin bloque de selección en 0.
+    from utils.whatsapp_formatter import construir_mensaje_registro_diario
+    msg = construir_mensaje_registro_diario(r, "10-09-2026")
+    _cons("entrada pura msg: bloque Revuelto con 2 fuentes",
+          "Registro de Revuelto registrada: 2 fuente(s), total 5,858.00 kg, fecha 10-09-2026." in msg)
+    _cons("entrada pura msg: sin bloque de selección en 0", "Selección registrada" not in msg)
+
+
 def test_catalogo_completo_mas_de_30():
     """La carga del catálogo (recargar_catalogos) devuelve TODOS los materiales
     (no está limitada a 10): con 35 registros se cargan los 35, ordenados
@@ -1503,6 +1548,21 @@ def test_fast_path_determinista():
           any(i["material_nombre"] == "Lamina" and i["cantidad_kg"] == 3032.5
               for i in d2.get("items", [])))
 
+    # 2b) Encabezado con sufixo de remisión ('Venta # 2') NO se toma como un
+    # MATERIAL: reconoce la intención y conserva los 6 ítems reales. Regression:
+    # antes el genérico parseaba 'Venta # 2' como material 'Venta #' × 2 kg,
+    # dejaba la intención en None y el registro fallaba.
+    msg2b = ("Venta # 2\n* Grueso 5100\n* Acero 1485\n* Olla 3503\n"
+             "* Lamina 449\n* Perfil 990\n* Arreglo de grueso 380")
+    d2b = intentar_fast_path(msg2b, inv)
+    _cons("fast: 'Venta # 2' fija VENTA_DESPACHO",
+          d2b is not None and d2b.get("intencion") == "VENTA_DESPACHO")
+    _cons("fast: 'Venta #' NO queda como material",
+          d2b is not None and not any(
+              "venta" in i["material_nombre"].lower() for i in d2b.get("items", [])))
+    _cons("fast: 'Venta # 2' conserva los 6 ítems",
+          d2b is not None and len(d2b.get("items", [])) == 6)
+
     # 3) Texto libre NO estructurado → None (fallback IA).
     _cons("fast: texto libre cae a IA",
           intentar_fast_path("Quemé 1354 kg de cable, salieron 600 kg de cobre y 754 kg de basura", inv) is None)
@@ -1555,6 +1615,7 @@ def main():
     test_fecha_no_se_trata_como_material_y_formatos()
     test_nombre_merma_por_prefijo()
     test_venta_sinonimos_grueso_carter_y_lamina()
+    test_registro_diario_entrada_pura()
     test_catalogo_completo_mas_de_30()
     test_lista_whatsapp_selecciona_formato()
     test_reporte_texto_alfabetico()

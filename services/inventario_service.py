@@ -762,11 +762,14 @@ class InventarioServiceConValidacion:
             tipo=TipoTransaccion.ENTRADA_BRUTA, cantidad=cantidad, fecha=fecha, lote_id=lote_id,
             observaciones=f"Ingreso de Revuelto desde {fuente.nombre}",
         ) for fuente, cantidad in entradas_validadas]
-        movimientos.append(self._movimiento(
-            usuario_id=usuario_id, bodega_id=bodega_id, material_id=revuelto.id,
-            tipo=TipoTransaccion.TRANSFORMACION, cantidad=-total_procesado, fecha=fecha, lote_id=lote_id,
-            observaciones="Salida de Revuelto por selección",
-        ))
+        # ENTRADA PURA (sin selección): total_procesado == 0 → no se genera el
+        # movimiento de salida de Revuelto (un -0 kg sería ruido en la DB).
+        if total_procesado > 0.005:
+            movimientos.append(self._movimiento(
+                usuario_id=usuario_id, bodega_id=bodega_id, material_id=revuelto.id,
+                tipo=TipoTransaccion.TRANSFORMACION, cantidad=-total_procesado, fecha=fecha, lote_id=lote_id,
+                observaciones="Salida de Revuelto por selección",
+            ))
         movimientos.extend(self._movimiento(
             usuario_id=usuario_id, bodega_id=bodega_id, material_id=material.id,
             fuente_id=fuente_seleccion.id, tipo=TipoTransaccion.TRANSFORMACION, cantidad=cantidad, fecha=fecha, lote_id=lote_id,

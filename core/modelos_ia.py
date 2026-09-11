@@ -384,7 +384,11 @@ def validar_completitud(datos: Dict[str, Any], fecha_mensaje: str, cliente_exist
 
     if intento in ("ENTRADA_REVUELTO", "REGISTRO_DIARIO") and not datos.get("entradas_revuelto"):
         return "Indica las fuentes y los kilos de Revuelto, por ejemplo: Cooperativa 500.", "entradas_revuelto"
-    if intento in ("REGISTRO_DIARIO", "COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO") and not datos.get("items"):
+    # REGISTRO_DIARIO: una ENTRADA PURA de Revuelto (solo fuentes, sin
+    # selección) es válida — los materiales solo se exigen si no hay entradas.
+    if intento == "REGISTRO_DIARIO" and not datos.get("items") and not datos.get("entradas_revuelto"):
+        return "Indica los materiales y kilos que se deben registrar.", "items"
+    if intento in ("COMPRA_DIRECTA", "VENTA_DESPACHO", "AJUSTE_INVENTARIO") and not datos.get("items"):
         return "Indica los materiales y kilos que se deben registrar.", "items"
     if intento == "SELECCION_REVUELTO" and not datos.get("items") and not datos.get("merma_kg", 0):
         return "Indica los materiales seleccionados o la cantidad de basura a descontar del Revuelto.", "items"
