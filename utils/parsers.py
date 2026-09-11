@@ -201,30 +201,12 @@ def parsear_fecha_colombiana(texto: str) -> Optional[str]:
 
 
 def extraer_fecha_texto(texto: str) -> Optional[str]:
-    """Busca una fecha colombiana en cualquier línea del texto y devuelve su
-    ISO (YYYY-MM-DD), o None si no hay ninguna.
-
-    Sirve como red de seguridad: si la IA no extrajo la fecha que el usuario
-    escribió inline en un mensaje (ej. '27/08 Quemé 1354 kg...', 'Selección
-    04-09-2026' o '04 sep'), se captura de forma determinista y no cae por
-    defecto en la fecha del mensaje ('hoy')."""
-    for linea in (texto or "").split("\n"):
-        ln = linea.strip().lstrip("*-•").strip()
-        if not ln:
-            continue
-        f = parsear_fecha_colombiana(ln)
-        if f:
-            return f
-    return None
-
-
-def extraer_fecha_texto(texto: str) -> Optional[str]:
-    """Busca una fecha colombiana (dd-mm, dd-mm-aaaa, dd/mm, dd/mm/aaaa o un
-    día relativo) en cualquier línea del texto y devuelve su ISO (YYYY-MM-DD),
-    o None si no hay ninguna. Se usa como red de seguridad: si la IA no
-    extrajo la fecha que el usuario escribió inline en un mensaje nuevo (ej.
-    '27/08 Quemé 1354 kg...'), se captura de forma determinista y se evita
-    caer por defecto en la fecha del mensaje ('hoy')."""
+    """Busca una fecha colombiana (dd-mm, dd-mm-aaaa, dd/mm, dd/mm/aaaa, con
+    mes por nombre o un día relativo) en cualquier línea del texto y devuelve
+    su ISO (YYYY-MM-DD), o None si no hay ninguna. Se usa como red de
+    seguridad: si la IA no extrajo la fecha que el usuario escribió inline en
+    un mensaje nuevo (ej. '27/08 Quemé 1354 kg...'), se captura de forma
+    determinista y se evita caer por defecto en la fecha del mensaje ('hoy')."""
     for linea in (texto or "").split("\n"):
         ln = linea.strip().lstrip("*-•").strip().lower()
         if not ln:

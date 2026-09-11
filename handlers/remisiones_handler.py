@@ -31,6 +31,7 @@ from utils.parsers import (
     parsear_campos_cliente, parsear_campos_cliente_venta, parsear_fecha_colombiana,
     parsear_material_cantidad,
 )
+from utils.fast_path import intentar_fast_path
 from utils.whatsapp_formatter import construir_mensaje_seleccion, construir_mensaje_registro_diario
 
 logger = logging.getLogger(__name__)
@@ -783,7 +784,16 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
         else:
             datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
     else:
-        datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
+        # FAST PATH determinista: si el mensaje encaja con los bloques
+        # estructurados que usan los operadores (encabezado Selección/Venta +
+        # viñetas 'Material Cantidad' + fecha opcional + 'Fuente 3135'), se
+        # parsea SIN IA (más rápido, barato y sin alucinaciones). Si alguna
+        # línea se le escapa, devolverá None y cae al flujo conversacional de
+        # DeepSeek (la IA sigue para conversar e interpretar).
+        datos = intentar_fast_path(texto, inventario, borrador_anterior)
+        if datos is None:
+            logger.info("Fast path no aplicó para mensaje de %s → IA", usuario.get("id"))
+            datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
     if datos is None:
         # IA no disponible: se purgan los materiales del borrador para que un
         # reintento del usuario no acumule ítems del intento fallido.

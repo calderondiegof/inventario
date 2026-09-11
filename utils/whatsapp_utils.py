@@ -40,7 +40,7 @@ def construir_lista_texto_whatsapp(items: Iterable, titulo: str = "Catalogo de M
     lineas = [f"\U0001F4CB *{titulo}* ({len(nombres)} disponibles):\n"]
     for idx, mat in enumerate(nombres, 1):
         lineas.append(f"{idx}. {mat}")
-    lineas.append("\n_Escribe el nombre del material o el codigo para continuar._")
+    lineas.append("\n_Escribe el nombre del material o el código para continuar._")
     return "\n".join(lineas)
 
 def resolver_entrada_material(texto: str, nombres_ordenados: Iterable[str]) -> Optional[str]:
@@ -95,6 +95,16 @@ def procesar_precio_paso_a_paso(texto, items, precios, indice_esperado):
     t = (texto or "").strip().lower()
     if t == "cancelar":
         return {"tipo": "cancelar", "precios": precios, "texto": ""}
+    if t == "0" and not precios:
+        # '0' sin ningún precio registrado: no hay nada que descartar.
+        return {
+            "tipo": "invalido", "indice": indice_esperado, "precios": precios,
+            "texto": (
+                "No hay un precio anterior que descartar. Indica el precio por "
+                f"kilo para '{_nombre_material(items[indice_esperado - 1])}' "
+                "(o *cancelar*):"
+            ),
+        }
     if t == "0" and precios:
         mid_a_nombre = {
             str(it.get("movimiento_id", "")): _nombre_material(it)
@@ -159,8 +169,8 @@ def procesar_precio_paso_a_paso(texto, items, precios, indice_esperado):
             "indice": indice_esperado,
             "precios": precios,
             "texto": (
-                f"âš ï¸ '{texto}' no es un precio vÃ¡lido. Indica el valor "
-                f"numÃ©rico por kilo para '{nombre}' (ej. 16000) o *0* para saltar:"
+                f"⚠️ '{texto}' no es un precio válido. Indica el valor "
+                f"numérico por kilo para '{nombre}' (ej. 16000) o *0* para saltar:"
             ),
         }
     item_actual = items[indice_esperado - 1]
@@ -178,19 +188,22 @@ def procesar_precio_paso_a_paso(texto, items, precios, indice_esperado):
             ),
         }
     return {"tipo": "final", "precios": precios, "texto": "", "indice": indice_esperado}
-def borrador_para_nueva_lista(borrador: Optional[Dict[str, Any]], modo: str = "compra") -> Dict[str, Any]:
-    """Reinicia el borrador para una nueva lista de materiales."""
-    resultado = {
-        "bodega_id": (borrador or {}).get("bodega_id"),
-        "usuario_id": (borrador or {}).get("usuario_id"),
-        "intencion": modo.upper(),
-        "items": [],
-        "precios": {},
-    }
-    for clave in ("cliente", "conductor", "conductor_id", "fecha"):
-        if clave in (borrador or {}):
-            resultado[clave] = (borrador or {})[clave]
-    return resultado
+def borrador_para_nueva_lista(borrador: Optional[Dict[str, Any]], texto: str = "") -> Dict[str, Any]:
+    """Prepara el borrador para fusionar la extracción de un NUEVO mensaje.
+
+    Si el mensaje es una lista de materiales (reintento del usuario), la lista
+    anterior del borrador se SOBRESCRIBE (items = []) para que la fusión no
+    CONCATENE los ítems del intento fallido con los del nuevo. El resto de
+    campos del borrador (intención, cliente, fecha…) se conserva. Si el
+    mensaje no es una lista, el borrador pasa intacto.
+
+    Nota: el segundo parámetro es el TEXTO del mensaje nuevo (no un modo).
+    ``inferir_datos_ia`` lo pasa tal cual llega del usuario.
+    """
+    borrador_limpio = dict(borrador or {})
+    if texto and es_lista_materiales(texto):
+        borrador_limpio["items"] = []
+    return borrador_limpio
 
 def es_lista_materiales(texto: str) -> bool:
     """Detecta si el texto parece una lista de materiales con cantidades.

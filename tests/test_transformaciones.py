@@ -289,8 +289,8 @@ def test_regla2_quema_cable():
           abs(r.get("ingreso_inventario", 0) - 600.0) < 0.01)
     _cons("Regla2: descontado_origen = productos + merma (1000)",
           abs(r.get("descontado_origen", 0) - 1000.0) < 0.01
-          and abs(merma := float(r.get("merma_kg") or 0)) < 0.01
-          and abs(r["descontado_origen"] - (r["ingreso_inventario"] + merma)) < 0.01)
+          and abs((r.get("merma_kg") or 0) - 400.0) < 0.01
+          and abs(r["descontado_origen"] - (r.get("ingreso_inventario", 0) + (r.get("merma_kg") or 0))) < 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,6 +1450,93 @@ def test_conductor_service_normalizacion_y_placas():
 
 
 
+def test_fast_path_determinista():
+    """Fast path SIN IA: bloques estructurados (Selección / Venta / fuente kg)
+    se parsean de forma determinista y los mensajes libres caen a la IA.
+
+    1. 'Fuente + Selección + fecha' → REGISTRO_DIARIO con entradas, items sin
+       basura, merma = basura y fecha inline (los 3 fallos que dio la IA).
+    2. 'Venta' con sinónimos → VENTA_DESPACHO, Grueso→Carter resuelto.
+    3. Texto libre ('Quemé 1354 kg de cable...') → None → fallback IA.
+    4. Fuente sola ambigua ('Cooperativa 3135') → None → fallback IA.
+    """
+    from utils.fast_path import intentar_fast_path
+
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Revuelto", "tipo_material": "BRUTO", "es_comercializable": True},
+        {"nombre": "Carter", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Lamina", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Olla", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Cobre", "tipo_material": "LIMPIO", "es_comercializable": True},
+        {"nombre": "Basura", "tipo_material": "MERMA", "es_comercializable": True},
+    ])
+    fake._seed("fuentes_origen", [
+        {"nombre": "Cooperativa", "tipo_fuente": "EXTERNA_REVUELTO"},
+    ])
+    inv.recargar_catalogos()
+
+    # 1) Registro diario completo del caso real 08-09.
+    msg1 = (
+        "08-09\nCooperativa 3135\n\nSelección\n* Grueso 1084\n* Lamina 329\n"
+        "* Olla 297\n* Cobre 5\n* Basura 1010"
+    )
+    d1 = intentar_fast_path(msg1, inv)
+    _cons("fast: aplica al registro diario estructurado", d1 is not None)
+    _cons("fast: intención REGISTRO_DIARIO", d1.get("intencion") == "REGISTRO_DIARIO")
+    _cons("fast: fecha inline 08-09 → 2026-09-08", d1.get("fecha_operacion") == "2026-09-08")
+    _cons("fast: entrada Cooperativa 3135",
+          d1.get("entradas_revuelto") == [{"fuente_nombre": "Cooperativa", "cantidad_kg": 3135}])
+    _cons("fast: 4 materiales sin basura",
+          [i["material_nombre"] for i in d1.get("items", [])] == ["Carter", "Lamina", "Olla", "Cobre"])
+    _cons("fast: merma 1010 desde Basura", abs((d1.get("merma_kg") or 0) - 1010) < 0.01)
+
+    # 2) Venta estructurada con sinónimo y cantidad decimal.
+    msg2 = "Venta\n* Grueso 7117\n* Lamina 3032.5\n* Plomo 567"
+    d2 = intentar_fast_path(msg2, inv)
+    _cons("fast: aplica a la venta estructurada", d2 is not None)
+    _cons("fast: intención VENTA_DESPACHO", d2.get("intencion") == "VENTA_DESPACHO")
+    _cons("fast: sinónimo Grueso → Carter",
+          any(i["material_nombre"] == "Carter" and i["cantidad_kg"] == 7117
+              for i in d2.get("items", [])))
+    _cons("fast: cantidad decimal 3032.5",
+          any(i["material_nombre"] == "Lamina" and i["cantidad_kg"] == 3032.5
+              for i in d2.get("items", [])))
+
+    # 3) Texto libre NO estructurado → None (fallback IA).
+    _cons("fast: texto libre cae a IA",
+          intentar_fast_path("Quemé 1354 kg de cable, salieron 600 kg de cobre y 754 kg de basura", inv) is None)
+    _cons("fast: saludo conversacional cae a IA",
+          intentar_fast_path("hola, cómo va el inventario de hoy", inv) is None)
+
+    # 4) Fuente sola sin selección (ambigua) → None (fallback IA).
+    _cons("fast: fuente sola ambigua cae a IA",
+          intentar_fast_path("Cooperativa 3135", inv) is None)
+
+    # 4b) GUARD peso-precio: líneas con DOS números ('Grueso 7117 -2500' =
+    # peso -precio) NO se interpretan: el genérico confundiría el precio con
+    # la cantidad. Se aborta y cae a la IA (comportamiento pre-fast-path).
+    _cons("fast: línea peso-precio cae a IA (guard dos números)",
+          intentar_fast_path("Venta\\n* Grueso 7117 -2500\\n* Lamina 3032 -2400", inv) is None)
+    _cons("fast: bloque con línea personal + peso-precio cae a IA",
+          intentar_fast_path("08-09\\nfabian\\njuan catanneo\\nVenta\\n* Grueso 7117 -2500\\n"
+                             "* Lamina 3032 -2400\\n* Plomo 567 -3000\\ndolar 1500", inv) is None)
+
+    # 5) Fusión con borrador previo: segunda selección acumula (no pisa).
+    d3 = intentar_fast_path("Selección\n* Cobre 20", inv, borrador={"items": [{"material_nombre": "Cobre", "cantidad_kg": 5}]})
+    _cons("fast: segunda lista ACUMULA con el borrador",
+          d3.get("items") == [{"material_nombre": "Cobre", "cantidad_kg": 25.0}])
+
+    # 6) Integración con consolidar_seleccion: idempotente, merma intacta.
+    from handlers.remisiones_handler import consolidar_seleccion
+    datos_ia = {"intencion": "REGISTRO_DIARIO", "items": [
+        {"material_nombre": "Basura", "cantidad_kg": 1010}], "merma_kg": 9.0}
+    consolidar_seleccion(datos_ia, "Selección\n* Basura 1010")
+    _cons("fast+consolidar: basura fuera de items y merma 1010",
+          not datos_ia.get("items") and abs((datos_ia.get("merma_kg") or 0) - 1010) < 0.01)
+
+
+
 def main():
     test_regla1_revuelto()
     test_regla2_quema_cable()
@@ -1476,6 +1563,8 @@ def main():
     test_crear_cliente_conductor_material()
     test_atributos_explicitos_placas_y_direccion()
     test_conductor_service_normalizacion_y_placas()
+
+    test_fast_path_determinista()
 
     test_direccion_opcional_conductor()
     test_normalizacion_y_validacion_cliente()

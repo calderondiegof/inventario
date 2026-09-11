@@ -66,24 +66,12 @@ def normalizar_placa(placa: str) -> str:
 def extraer_placas(texto: str) -> Tuple[Optional[str], Optional[str]]:
     """Extrae hasta dos placas vehiculares de un texto.
 
-    Busca patrones como 'ABC123' o 'ABC-123' en el texto y devuelve
-    la placa principal (cabezal) y la placa del trailer/remolque.
-
-    Args:
-        texto: texto que puede contener una o más placas.
-
-    Returns:
-        Tupla (placa_principal, placa_trailer) donde cada elemento es
-        None si no se encontró.
+    Delega en la implementación canónica de ``utils.parsing_utils``
+    (soporta Colombia 'AAA123' y Argentina 'AA123BB', separadores '/' o ',',
+    y etiquetas 'Placa: ... / Trailer: ...'). Antes esta versión tenía un bug
+    (``m.group(1)`` sobre un patrón sin grupos de captura) que lanzaba
+    ``IndexError`` y abortaba los flujos de entidades/crear.
     """
-    if not texto:
-        return None, None
-    patron = re.compile(
-        r"\b([A-Z]{3}[- ]?[0-9]{3})\b",
-        re.IGNORECASE
-    )
-    coincidencias = [
-        normalizar_placa(m.group(1))
-        for m in patron.finditer(texto)
-    ]
-    return coincidencias[0] if coincidencias else None, coincidencias[1] if len(coincidencias) > 1 else None
+    from utils.parsing_utils import extraer_placas as _extraer_placas_canonico
+
+    return _extraer_placas_canonico(texto)
