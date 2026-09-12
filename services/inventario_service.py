@@ -476,6 +476,10 @@ class InventarioServiceConValidacion:
         - salidas: lista de {"etiqueta": "Selección", "kg": 9401.0}
         - total_entradas, total_salidas, movimiento, saldo_final
         """
+        import time
+        from datetime import datetime
+
+        start_time = time.time()
         material = self._material_por_nombre(material_nombre)
         fecha_d = self.validar_fecha(fecha_desde)
         fecha_h = self.validar_fecha(fecha_hasta)
@@ -568,6 +572,46 @@ class InventarioServiceConValidacion:
             f"Saldo final ({informe['fecha_hasta']}): {informe['saldo_final']:,.2f} kg",
         ])
 
+        return "\n".join(lineas)
+
+    def obtener_informe_material_texto_desde_informe(self, *, informe: Dict[str, Any]) -> str:
+        """Formatea un informe (dict) ya obtenido como texto para WhatsApp.
+        Revisa ``obtener_informe_material`` para ver la estructura esperada."""
+        material = informe.get("material", "Desconocido")
+        bodega = informe.get("bodega_id", "?")
+        desde = informe.get("fecha_desde", "")
+        hasta = informe.get("fecha_hasta", "")
+        saldo_inicial = informe.get("saldo_inicial", 0.0)
+        entradas = informe.get("entradas", [])
+        salidas = informe.get("salidas", [])
+        total_entradas = round(sum(x.get("kg", 0) for x in entradas), 2)
+        total_salidas = round(sum(x.get("kg", 0) for x in salidas), 2)
+        movimiento = round(total_entradas - total_salidas, 2)
+        saldo_final = round(saldo_inicial + movimiento, 2)
+
+        lineas = [
+            f"📋 Informe de {material.upper()} — Bodega #{bodega}",
+            f"Período: {desde} al {hasta}",
+            "",
+            f"Saldo inicial: {saldo_inicial:,.2f} kg",
+            "",
+        ]
+        if entradas:
+            lineas.append(f"ENTRADAS {material.upper()}")
+            for e in entradas:
+                lineas.append(f"  {e['etiqueta']}: {e['kg']:,.2f} kg")
+            lineas.append(f"Total Entradas: {total_entradas:,.2f} kg")
+        if salidas:
+            lineas.append("")
+            lineas.append(f"SALIDAS {material.upper()}")
+            for s in salidas:
+                lineas.append(f"  {s['etiqueta']}: -{s['kg']:,.2f} kg")
+            lineas.append(f"Total Salidas: -{total_salidas:,.2f} kg")
+        lineas.extend([
+            "",
+            f"Total movimientos período: {movimiento:+,.2f} kg",
+            f"Saldo final ({hasta}): {saldo_final:,.2f} kg",
+        ])
         return "\n".join(lineas)
 
     def obtener_o_crear_cliente(self, *, nombre: str, documento: Optional[str] = None,

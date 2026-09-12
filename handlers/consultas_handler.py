@@ -67,13 +67,21 @@ async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre
     El texto SIEMPRE se envía. El gráfico, si se solicita, se genera en
     segundo plano y no bloquea la respuesta de texto.
     """
-    # 1. Texto: siempre, de forma síncrona pero con timeout implícito del handler.
+    # 1. Obtener el informe UNA sola vez (con timeout)
     try:
-        texto = await asyncio.to_thread(
-            inventario.obtener_informe_material_texto,
-            bodega_id=bodega_id, material_nombre=material_nombre,
-            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+        informe = await asyncio.wait_for(
+            asyncio.to_thread(
+                inventario.obtener_informe_material,
+                bodega_id=bodega_id,
+                material_nombre=material_nombre,
+                fecha_desde=fecha_desde,
+                fecha_hasta=fecha_hasta,
+            ),
+            timeout=30.0,
         )
+    except asyncio.TimeoutError:
+        await enviar_mensaje_whatsapp(telefono, "⏱️ La consulta del informe tardó demasiado. Intenta de nuevo más tarde.")
+        return
     except ValueError as e:
         await enviar_mensaje_whatsapp(telefono, f"⚠️ {e}")
         return
@@ -81,30 +89,26 @@ async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre
         await enviar_mensaje_whatsapp(telefono, f"⚠️ Error al consultar el informe: {e}")
         return
 
+    # 2. Formatear y enviar el texto
+    try:
+        texto = inventario.obtener_informe_material_texto_desde_informe(informe)
+    except Exception as e:
+        await enviar_mensaje_whatsapp(telefono, f"⚠️ Error al formatear el informe: {e}")
+        return
+
     await enviar_mensaje_whatsapp(telefono, texto)
 
-    # 2. Gráfico: solo si se pidió, en background, sin bloquear.
+    # 3. Gráfico: solo si se pidió, en background, sin volver a consultar BD
     if incluir_grafico:
-        asyncio.create_task(_enviar_grafico_informe_material_bg(
-            telefono, bodega_id, material_nombre, fecha_desde, fecha_hasta,
-        ))
+        asyncio.create_task(_enviar_grafico_informe_material_bg(informe, telefono))
 
 
 async def _enviar_grafico_informe_material_bg(
-    telefono: str, bodega_id: int, material_nombre: str,
-    fecha_desde: str, fecha_hasta: str,
+    informe: Dict[str, Any], telefono: str,
 ) -> None:
     """Genera y envía el gráfico en segundo plano. Si falla, se silencia
-    (el texto ya llegó)."""
-    try:
-        informe = await asyncio.to_thread(
-            inventario.obtener_informe_material,
-            bodega_id=bodega_id, material_nombre=material_nombre,
-            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
-        )
-    except Exception:
-        return  # si falla la consulta del gráfico, se silencia
-
+    (el texto ya llegó). No re-consulta la BD porque recibe el informe ya obtenido."""
+    # informe ya viene como parámetro (no re-consulta BD)
     if not (informe.get("entradas") or informe.get("salidas")):
         return  # nada que graficar
 
@@ -120,7 +124,7 @@ async def _enviar_grafico_informe_material_bg(
         try:
             await enviar_imagen_whatsapp(
                 telefono, url,
-                f"Informe {informe['material']} ({fecha_desde} a {fecha_hasta})",
+                f"Informe {informe['material']} ({informe['fecha_desde']} a {informe['fecha_hasta']})",
             )
         except Exception:
             pass  # si falla el envío de imagen, ya llegó el texto
