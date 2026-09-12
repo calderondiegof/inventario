@@ -17,7 +17,7 @@ from handlers import remisiones_handler
 from handlers import pdf_handler
 from handlers.consultas_handler import (
     enviar_grafico_inventario, enviar_grafico_movimientos_dia,
-    enviar_inventario_total, enviar_reporte_diario,
+    enviar_informe_material, enviar_inventario_total, enviar_reporte_diario,
     iniciar_inventario_total, iniciar_reporte_por_fecha,
     pedir_movimientos_material,
 )
@@ -477,6 +477,54 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     if texto_normalizado in {"grafico movimientos ayer", "movimientos ayer grafico"}:
         await enviar_grafico_movimientos_dia(telefono, bodega_id, message, dias_atras=1)
         return
+
+    # Informe por material: "informe cobre", "informe revuelto desde 05-09-2026
+    # hasta 10-09-2026", etc. El usuario define las fechas (una sola fecha = ese
+    # día; sin fecha = hoy).
+    if texto_normalizado.startswith("informe "):
+        resto = texto_normalizado[len("informe "):].strip()
+        if resto:
+            # Resolver el material: buscar el nombre del catálogo más largo que
+            # coincida al inicio del resto del mensaje.
+            candidatos = sorted(
+                (m.nombre for m in inventario.catalogo_materiales.values()),
+                key=len, reverse=True,
+            )
+            norm_resto = _normalizar_texto(resto)
+            material = next(
+                (c for c in candidatos if norm_resto.startswith(_normalizar_texto(c))),
+                None,
+            )
+            if material:
+                fechas = []
+                # Barrida por trozos de hasta 3 tokens consecutivos para captar
+                # fechas "05-09-2026" (1), "04 sep" (2) y relativas "hoy"/"ayer".
+                tokens = resto.split()
+                for n in (3, 2, 1):
+                    for i in range(len(tokens) - n + 1):
+                        trozo = " ".join(tokens[i:i + n])
+                        f = parsear_fecha_colombiana(trozo)
+                        if f and f not in fechas:
+                            fechas.append(f)
+                            break
+                if not fechas:
+                    fecha_desde = fecha_hasta = fecha_local_mensaje(message)
+                elif len(fechas) == 1:
+                    fecha_desde = fecha_hasta = fechas[0]
+                else:
+                    fecha_desde, fecha_hasta = fechas[0], fechas[-1]
+                await enviar_informe_material(
+                    telefono, bodega_id, material,
+                    fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+                )
+                return
+            else:
+                await enviar_mensaje_whatsapp(
+                    telefono,
+                    "No reconocí ese material. Escribe por ejemplo: *informe cobre* "
+                    "o *informe revuelto desde 05-09-2026 hasta 10-09-2026*.",
+                )
+                return
         
 
 # Despliegue estricto de sub-botones al presionar o escribir "Ver Inventario"

@@ -22,6 +22,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 COLOR_NEGATIVO = "#d9534f"
+COLOR_POSITIVO = "#2ca02c"  # verde para entradas
+COLOR_PRIMARIO = "#4a5568"  # gris/azul para saldos
+
 COLORES_TORTA = [
     "#1f3a5f", "#2c6693", "#4a90c4", "#7fb3d5", "#b0d0e8",
     "#f2a154", "#e07b39", "#c65b28", "#8c9b6e",
@@ -284,6 +287,186 @@ def generar_y_subir_grafico_movimientos_dia(bodega_id: int, fecha: str) -> str:
 
     except Exception as e:
         print(f"❌ [ENTR/SAL ERROR]: {type(e).__name__} - {e}")
+        return None
+    finally:
+        if fig:
+            plt.close(fig)
+        plt.close("all")
+
+
+def generar_grafico_informe_material(informe: Dict[str, Any]) -> "matplotlib.figure.Figure":
+    """Genera la figura (PNG en memoria) del informe por material.
+
+    **Opción B**: barras de evolución (Saldo Inicial → Entradas → Salidas → Saldo Final)
+    + tabla resumen debajo.
+
+    `informe` es el dict devuelto por
+    ``inventario.obtener_informe_material(...)`` (entradas/salidas son listas
+    de {"etiqueta", "kg"}).
+    """
+    # ---- Cálculos ----
+    saldo_inicial = informe.get("saldo_inicial", 0.0)
+    total_entradas = sum(x["kg"] for x in informe.get("entradas", []))
+    total_salidas = sum(x["kg"] for x in informe.get("salidas", []))
+    saldo_final = informe.get("saldo_final", 0.0) or round(
+        saldo_inicial + total_entradas - total_salidas, 2
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.set_axisbelow(True)
+
+    etiquetas = ["Saldo Inicial", "Entradas", "Salidas", "Saldo Final"]
+    valores = [
+        saldo_inicial,
+        total_entradas,
+        total_salidas,
+        saldo_final,
+    ]
+    colores = ["#8a8a8a", COLOR_POSITIVO, COLOR_NEGATIVO, COLOR_PRIMARIO]
+
+    # Barras verticales (evolución)
+    x = list(range(len(etiquetas)))
+    barras = ax.bar(
+        x, valores, width=0.5, color=colores, edgecolor="white", linewidth=0.5
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(etiquetas, fontsize=9)
+    ax.set_ylabel("Kilogramos (kg)", fontsize=10)
+    ax.set_title(
+        f"📋 Informe {informe['material']} ({informe['fecha_desde']} a "
+        f"{informe['fecha_hasta']}) — Bodega #{informe['bodega_id']}",
+        fontsize=11, fontweight="bold",
+    )
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+
+    # Etiquetas de valor sobre cada barra
+    max_val = max(valores) or 1.0
+    espacio = max_val * 0.02 or 1.0
+    for bar, val in zip(barras, valores):
+        if val > 0:
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + espacio,
+                f"{val:,.0f}",
+                ha="center", va="bottom", fontsize=9, fontweight="bold",
+            )
+
+    # ---- Tabla resumen debajo ----
+    ax.axis("off")
+    ax.set_title(
+        f"📋 Informe {informe['material']} ({informe['fecha_desde']} a "
+        f"{informe['fecha_hasta']}) — Bodega #{informe['bodega_id']}"
+    )
+    ax.axis("off")
+
+    # Recrear barras en subplots separados para no solaparse con la tabla
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(10, 7))
+    gs = fig.add_gridspec(2, 1, height_ratios=[2.5, 1.5], hspace=0.4)
+
+    # --- Gráfico de barras ---
+    ax_grafico = fig.add_subplot(gs[0])
+    ax_grafico.set_axisbelow(True)
+
+    x = list(range(len(etiquetas)))
+    barras = ax_grafico.bar(
+        x, valores, width=0.55, color=colores, edgecolor="white", linewidth=0.5
+    )
+    ax_grafico.set_xticks(x)
+    ax_grafico.set_xticklabels(etiquetas, fontsize=9)
+    ax_grafico.set_ylabel("Kilogramos (kg)", fontsize=10)
+    ax_grafico.grid(axis="y", linestyle="--", alpha=0.35)
+    ax_grafico.set_axisbelow(True)
+
+    max_val = max(valores) or 1.0
+    espacio = max_val * 0.02 or 1.0
+    for bar, val in zip(barras, valores):
+        if val > 0:
+            ax_grafico.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + espacio,
+                f"{val:,.0f}",
+                ha="center", va="bottom", fontsize=9, fontweight="bold",
+            )
+
+    ax_grafico.set_xlim(-0.5, len(etiquetas) - 0.5)
+
+    # --- Tabla resumen ---
+    ax_tabla = fig.add_subplot(gs[1])
+    ax_tabla.axis("off")
+    ax_tabla.set_title("Resumen del Informe", fontsize=10, fontweight="bold", y=0.85)
+
+    filas = []
+    if saldo_inicial:
+        filas.append(["Saldo Inicial", f"{saldo_inicial:,.2f} kg"])
+    for e in informe.get("entradas", []):
+        filas.append([f"   {e['etiqueta']}", f"{e['kg']:,.2f} kg"])
+    if informe.get("entradas"):
+        filas.append(["Total Entradas", f"{total_entradas:,.2f} kg"])
+    for s in informe.get("salidas", []):
+        filas.append([f"   {s['etiqueta']}", f"-{s['kg']:,.2f} kg"])
+    if informe.get("salidas"):
+        filas.append(["Total Salidas", f"-{total_salidas:,.2f} kg"])
+    filas.append(["Movimiento del período", f"{total_entradas - total_salidas:+,.2f} kg"])
+    filas.append(["Saldo Final", f"{saldo_final:,.2f} kg"])
+
+    tabla = ax_tabla.table(
+        cellText=filas,
+        colLabels=["Concepto", "Kilogramos (kg)"],
+        cellLoc="left",
+        loc="center",
+        colWidths=[0.65, 0.35],
+    )
+    tabla.auto_set_font_size(False)
+    tabla.set_fontsize(8.5)
+    tabla.scale(1, 1.4)
+
+    # Estilos de cabecera
+    for (row, col), cell in tabla.get_celld().items():
+        cell.set_edgecolor("#cccccc")
+        if row == 0:
+            cell.set_facecolor("#4a5568")
+            cell.set_text_props(color="white", fontweight="bold")
+            cell.set_fontsize(9)
+        else:
+            if "Total" in str(cell.get_text()):
+                cell.set_facecolor("#f0f0f0")
+                cell.set_text_props(fontweight="bold")
+            if "Saldo" in str(cell.get_text()):
+                cell.set_facecolor("#e8f5e9" if "Final" in str(cell.get_text()) else "#fff8e1")
+                cell.set_text_props(fontweight="bold")
+
+    plt.tight_layout()
+    return fig
+
+
+def generar_y_subir_grafico_informe_material(informe: Dict[str, Any]) -> str:
+    """Genera y sube a Storage la imagen del informe por material. Devuelve la
+    URL pública o None si hay error/figura vacía."""
+    fig = None
+    try:
+        fig = generar_grafico_informe_material(informe)
+        img_buffer = io.BytesIO()
+        fig.savefig(img_buffer, format="png", dpi=150, bbox_inches="tight")
+        img_buffer.seek(0)
+        bucket_name = "reportes"
+        nombre_mat = "".join(
+            c if (c.isalnum() or c in " _-") else " " for c in informe["material"]
+        ).strip().replace(" ", "_")
+        nombre_archivo_remote = (
+            f"informe_{nombre_mat or 'material'}_"
+            f"{informe['bodega_id']}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.png"
+        )
+        supabase.storage.from_(bucket_name).upload(
+            file=img_buffer.getvalue(),
+            path=nombre_archivo_remote,
+            file_options={"content-type": "image/png", "x-upsert": "true"}
+        )
+        url_publica = supabase.storage.from_(bucket_name).get_public_url(nombre_archivo_remote)
+        return url_publica
+    except Exception as e:
+        print(f"❌ [INFORME GRAF ERROR]: {type(e).__name__} - {e}")
         return None
     finally:
         if fig:

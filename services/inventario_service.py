@@ -462,6 +462,114 @@ class InventarioServiceConValidacion:
             lineas += ["", f"*Merma:* {total_merma:,.2f} kg"]
         return "\n".join(lineas)
 
+    def obtener_informe_material(self, *, bodega_id: int, material_nombre: str,
+                                  fecha_desde: str, fecha_hasta: str) -> Dict[str, Any]:
+        """Informe de un material en un rango de fechas (texto o gráfico).
+
+        Agrupa movimientos de movimientos_inventario por:
+        - Entradas: fuentes_origen.nombre (Cooperativa, Pesca, Planta, Compras, etc.)
+        - Salidas: observaciones (Selección, Remisiones, etc.)
+
+        Devuelve un dict con:
+        - saldo_inicial: saldo acumulado antes del período
+        - entradas: lista de {"etiqueta": "Cooperativa", "kg": 1000.0}
+        - salidas: lista de {"etiqueta": "Selección", "kg": 9401.0}
+        - total_entradas, total_salidas, movimiento, saldo_final
+        """
+        material = self._material_por_nombre(material_nombre)
+        fecha_d = self.validar_fecha(fecha_desde)
+        fecha_h = self.validar_fecha(fecha_hasta)
+
+        # Saldo inicial: suma de movimientos antes del período
+        previos = self.supabase.table("movimientos_inventario").select("cantidad_kg").eq(
+            "bodega_id", bodega_id).eq("material_id", material["id"]).lt(
+            "fecha_operacion", fecha_d).execute().data or []
+        saldo_inicial = sum(float(f["cantidad_kg"]) for f in previos)
+
+        # Movimientos del período
+        filas = self.supabase.table("movimientos_inventario").select(
+            "fecha_operacion,tipo_movimiento,cantidad_kg,observaciones,fuentes_origen(nombre)"
+        ).eq("bodega_id", bodega_id).eq("material_id", material["id"]).gte(
+            "fecha_operacion", fecha_d).lte("fecha_operacion", fecha_h).execute().data or []
+
+        # Agrupar entradas por fuente
+        entradas_map: Dict[str, float] = {}
+        salidas_map: Dict[str, float] = {}
+
+        for fila in filas:
+            cantidad = float(fila["cantidad_kg"])
+            fuente = (fila.get("fuentes_origen") or {}).get("nombre", "Sin fuente")
+            observacion = (fila.get("observaciones") or "").strip() or "Sin observación"
+
+            if cantidad > 0:
+                entradas_map[fuente] = entradas_map.get(fuente, 0.0) + cantidad
+            elif cantidad < 0:
+                # Para revuelto, las salidas por transformación son "Selección"
+                if fila["tipo_movimiento"] == TipoTransaccion.TRANSFORMACION.value:
+                    etiqueta = "Selección" if not observacion or observacion.lower() == "selección" else observacion
+                else:
+                    etiqueta = observacion
+                salidas_map[etiqueta] = salidas_map.get(etiqueta, 0.0) + abs(cantidad)
+
+        entradas = [{"etiqueta": k, "kg": round(v, 2)} for k, v in sorted(entradas_map.items(), key=lambda x: -x[1])]
+        salidas = [{"etiqueta": k, "kg": round(v, 2)} for k, v in sorted(salidas_map.items(), key=lambda x: -x[1])]
+
+        total_entradas = round(sum(x["kg"] for x in entradas), 2)
+        total_salidas = round(sum(x["kg"] for x in salidas), 2)
+        movimiento = round(total_entradas - total_salidas, 2)
+        saldo_final = round(saldo_inicial + movimiento, 2)
+
+        return {
+            "material": material["nombre"],
+            "bodega_id": bodega_id,
+            "fecha_desde": fecha_d,
+            "fecha_hasta": fecha_h,
+            "saldo_inicial": round(saldo_inicial, 2),
+            "entradas": entradas,
+            "salidas": salidas,
+            "total_entradas": total_entradas,
+            "total_salidas": total_salidas,
+            "movimiento": movimiento,
+            "saldo_final": saldo_final,
+        }
+
+    def obtener_informe_material_texto(self, *, bodega_id: int, material_nombre: str,
+                                        fecha_desde: str, fecha_hasta: str) -> str:
+        """Formatea el informe por material como texto para WhatsApp."""
+        informe = self.obtener_informe_material(
+            bodega_id=bodega_id, material_nombre=material_nombre,
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
+        )
+
+        lineas = [
+            f"📋 Informe de {informe['material'].upper()} — Bodega #{informe['bodega_id']}",
+            f"Período: {informe['fecha_desde']} al {informe['fecha_hasta']}",
+            "",
+            f"Saldo inicial: {informe['saldo_inicial']:,.2f} kg",
+            "",
+        ]
+
+        if informe["entradas"]:
+            lineas.append(f"ENTRADAS {informe['material'].upper()}")
+            for entrada in informe["entradas"]:
+                lineas.append(f"  {entrada['etiqueta']}: {entrada['kg']:,.2f} kg")
+            lineas.append(f"Total Entradas: {informe['total_entradas']:,.2f} kg")
+
+        if informe["salidas"]:
+            lineas.append("")
+            lineas.append(f"SALIDAS {informe['material'].upper()}")
+            for salida in informe["salidas"]:
+                lineas.append(f"  {salida['etiqueta']}: -{salida['kg']:,.2f} kg")
+            lineas.append(f"Total Salidas: -{informe['total_salidas']:,.2f} kg")
+
+        lineas.extend([
+            "",
+            f"Total movimientos período: {informe['movimiento']:+,.2f} kg",
+            f"Saldo final ({informe['fecha_hasta']}): {informe['saldo_final']:,.2f} kg",
+        ])
+
+        return "\n".join(lineas)
+
     def obtener_o_crear_cliente(self, *, nombre: str, documento: Optional[str] = None,
                                 telefono: Optional[str] = None, direccion: Optional[str] = None) -> Dict[str, Any]:
         """Busca un cliente por documento (si se dio) o por nombre normalizado (insensible a tildes y mayúsculas); si no existe, lo crea."""

@@ -10,7 +10,10 @@ from core.whatsapp import (
     enviar_botones_whatsapp, enviar_imagen_whatsapp, enviar_lista_whatsapp,
     enviar_mensaje_whatsapp,
 )
-from reporte_grafico import generar_y_subir_grafico_movimientos_dia, generar_y_subir_grafico_stock
+from reporte_grafico import (
+    generar_y_subir_grafico_informe_material, generar_y_subir_grafico_movimientos_dia,
+    generar_y_subir_grafico_stock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,40 @@ async def enviar_grafico_movimientos_dia(telefono: str, bodega_id: int,
     else:
         await enviar_mensaje_whatsapp(
             telefono, f"No hay movimientos registrados el {fecha} para graficar.")
+
+
+async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre: str,
+                                  fecha_desde: str, fecha_hasta: str,
+                                  incluir_grafico: bool = True) -> None:
+    """Envía el informe por material (texto) y, opcionalmente, el gráfico
+    entradas vs salidas (por material). El usuario define las fechas."""
+    try:
+        texto = await asyncio.to_thread(
+            inventario.obtener_informe_material_texto,
+            bodega_id=bodega_id, material_nombre=material_nombre,
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+        )
+    except ValueError as e:
+        await enviar_mensaje_whatsapp(telefono, f"⚠️ {e}")
+        return
+    await enviar_mensaje_whatsapp(telefono, texto)
+
+    if incluir_grafico:
+        try:
+            informe = await asyncio.to_thread(
+                inventario.obtener_informe_material,
+                bodega_id=bodega_id, material_nombre=material_nombre,
+                fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+            )
+        except ValueError:
+            return
+        if informe.get("entradas") or informe.get("salidas"):
+            url = await asyncio.to_thread(
+                generar_y_subir_grafico_informe_material, informe)
+            if url:
+                await enviar_imagen_whatsapp(
+                    telefono, url,
+                    f"Informe {informe['material']} ({fecha_desde} a {fecha_hasta})")
 
 
 async def iniciar_inventario_total(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
