@@ -467,6 +467,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         await enviar_reporte_diario(telefono, bodega_id, message, dias_atras=1)
         return
     # Gráfico de ENTRADAS vs SALIDAS del día (barras por material).
+    # Acepta texto exacto o con fecha opcional: "entradas vs salidas 10-09".
     if texto_normalizado in {
         "grafico movimientos", "grafico de movimientos", "movimientos grafico",
         "movimientos del dia grafico", "entradas vs salidas", "entradas y salidas",
@@ -476,6 +477,27 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
     if texto_normalizado in {"grafico movimientos ayer", "movimientos ayer grafico"}:
         await enviar_grafico_movimientos_dia(telefono, bodega_id, message, dias_atras=1)
+        return
+    _match_es = re.match(
+        r"^(?:entradas (?:vs|y) salidas|grafico (?:de )?(?:entradas (?:vs|y) salidas|movimientos))"
+        r"(?:\s+(?P<fecha>.+))?$",
+        texto_normalizado,
+    )
+    if _match_es:
+        fecha_txt = (_match_es.group("fecha") or "").strip()
+        if not fecha_txt or fecha_txt in ("hoy", "de hoy", "del dia", "de el dia"):
+            await enviar_grafico_movimientos_dia(telefono, bodega_id, message)
+        elif fecha_txt in ("ayer", "de ayer"):
+            await enviar_grafico_movimientos_dia(telefono, bodega_id, message, dias_atras=1)
+        else:
+            f = parsear_fecha_colombiana(fecha_txt)
+            if f:
+                await enviar_grafico_movimientos_dia(telefono, bodega_id, message, fecha=f)
+            else:
+                await enviar_mensaje_whatsapp(
+                    telefono,
+                    "No entendí la fecha. Usa por ejemplo: *entradas vs salidas 10-09-2026*.",
+                )
         return
 
     # Informe por material: "informe cobre", "informe revuelto desde 05-09-2026
