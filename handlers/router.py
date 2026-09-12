@@ -17,7 +17,7 @@ from handlers import remisiones_handler
 from handlers import pdf_handler
 from handlers.consultas_handler import (
     enviar_grafico_inventario, enviar_grafico_movimientos_dia,
-    enviar_informe_material, enviar_informe_material_seguro,
+    enviar_informe_material, enviar_informe_material_pdf_seguro, enviar_informe_material_seguro,
     enviar_inventario_total, enviar_reporte_diario,
     iniciar_inventario_total, iniciar_reporte_por_fecha,
     pedir_movimientos_material,
@@ -512,6 +512,10 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     # día; sin fecha = hoy).
     if texto_normalizado.startswith("informe "):
         resto = texto_normalizado[len("informe "):].strip()
+        # Variante PDF: "informe pdf revuelto 10-09" o "pdf informe revuelto..."
+        quiere_pdf = "pdf" in resto.split() or texto_normalizado.startswith("informe pdf")
+        if quiere_pdf:
+            resto = resto.replace("pdf", "", 1).strip()
         if resto:
             # Resolver el material: buscar el nombre del catálogo más largo que
             # coincida al inicio del resto del mensaje.
@@ -542,10 +546,16 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     fecha_desde = fecha_hasta = fechas[0]
                 else:
                     fecha_desde, fecha_hasta = fechas[0], fechas[-1]
-                await enviar_informe_material_seguro(
-                    telefono, bodega_id, material,
-                    fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
-                )
+                if quiere_pdf:
+                    await enviar_informe_material_pdf_seguro(
+                        telefono, bodega_id, material,
+                        fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+                    )
+                else:
+                    await enviar_informe_material_seguro(
+                        telefono, bodega_id, material,
+                        fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+                    )
                 return
             else:
                 await enviar_mensaje_whatsapp(

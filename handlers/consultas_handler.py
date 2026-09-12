@@ -1,15 +1,18 @@
 """Handler de consultas: reportes diarios, graficos, inventario total y movimientos."""
 import asyncio
 import logging
+import os
+import tempfile
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from core.config import inventario
 from core.contexto import fecha_local_mensaje, guardar_contexto
 from core.whatsapp import (
-    enviar_botones_whatsapp, enviar_imagen_whatsapp, enviar_lista_whatsapp,
-    enviar_mensaje_whatsapp,
+    enviar_botones_whatsapp, enviar_documento_whatsapp, enviar_imagen_whatsapp,
+    enviar_lista_whatsapp, enviar_mensaje_whatsapp,
 )
+from generador_pdf_informe import generar_informe_material_pdf
 from reporte_grafico import (
     generar_y_subir_grafico_movimientos_dia,
     generar_y_subir_grafico_stock,
@@ -87,6 +90,49 @@ async def enviar_informe_material_seguro(telefono: str, bodega_id: int, material
         await enviar_mensaje_whatsapp(
             telefono,
             f"⚠️ No pude generar el informe de {material_nombre}.\n"
+            f"Motivo: {exc}"
+        )
+
+
+async def enviar_informe_material_pdf(telefono: str, bodega_id: int, material_nombre: str,
+                                      fecha_desde: str, fecha_hasta: str) -> None:
+    """Informe por material como PDF (gráfico + tabla), igual flujo que las
+    remisiones: generar en temp → enviar documento. Reutiliza el MISMO
+    `obtener_informe_material` del texto ya verificado."""
+    informe = await asyncio.to_thread(
+        inventario.obtener_informe_material,
+        bodega_id=bodega_id,
+        material_nombre=material_nombre,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    )
+    slug = "".join(ch for ch in material_nombre.lower() if ch.isalnum()) or "material"
+    nombre_pdf = (f"reporte_{slug}_{fecha_desde}_{fecha_hasta}_"
+                  f"{int(datetime.now().timestamp())}.pdf")
+    pdf_path = os.path.join(tempfile.gettempdir(), nombre_pdf)
+    await asyncio.to_thread(generar_informe_material_pdf, pdf_path, informe)
+    try:
+        await enviar_documento_whatsapp(
+            destino=telefono,
+            ruta_archivo=pdf_path,
+            nombre_documento=f"Reporte_Material_{material_nombre.replace(' ', '_')}.pdf",
+        )
+    finally:
+        # Limpieza del archivo temporal sin bloquear el event loop.
+        await asyncio.to_thread(os.remove, pdf_path) if os.path.exists(pdf_path) else None
+
+
+async def enviar_informe_material_pdf_seguro(telefono: str, bodega_id: int, material_nombre: str,
+                                             fecha_desde: str, fecha_hasta: str) -> None:
+    """Wrapper con try/except para el PDF del informe (nunca se queda callado)."""
+    try:
+        await enviar_informe_material_pdf(telefono, bodega_id, material_nombre,
+                                          fecha_desde, fecha_hasta)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Error en PDF de informe de material %s: %s", material_nombre, exc)
+        await enviar_mensaje_whatsapp(
+            telefono,
+            f"⚠️ No pude generar el PDF del informe de {material_nombre}.\n"
             f"Motivo: {exc}"
         )
 
