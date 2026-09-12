@@ -60,9 +60,14 @@ async def enviar_grafico_movimientos_dia(telefono: str, bodega_id: int,
 
 async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre: str,
                                   fecha_desde: str, fecha_hasta: str,
-                                  incluir_grafico: bool = True) -> None:
+                                  incluir_grafico: bool = False) -> None:
     """Envía el informe por material (texto) y, opcionalmente, el gráfico
-    entradas vs salidas (por material). El usuario define las fechas."""
+    entradas vs salidas (por material). El usuario define las fechas.
+
+    El texto SIEMPRE se envía. El gráfico, si se solicita, se genera en
+    segundo plano y no bloquea la respuesta de texto.
+    """
+    # 1. Texto: siempre, de forma síncrona pero con timeout implícito del handler.
     try:
         texto = await asyncio.to_thread(
             inventario.obtener_informe_material_texto,
@@ -72,24 +77,53 @@ async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre
     except ValueError as e:
         await enviar_mensaje_whatsapp(telefono, f"⚠️ {e}")
         return
+    except Exception as e:
+        await enviar_mensaje_whatsapp(telefono, f"⚠️ Error al consultar el informe: {e}")
+        return
+
     await enviar_mensaje_whatsapp(telefono, texto)
 
+    # 2. Gráfico: solo si se pidió, en background, sin bloquear.
     if incluir_grafico:
+        asyncio.create_task(_enviar_grafico_informe_material_bg(
+            telefono, bodega_id, material_nombre, fecha_desde, fecha_hasta,
+        ))
+
+
+async def _enviar_grafico_informe_material_bg(
+    telefono: str, bodega_id: int, material_nombre: str,
+    fecha_desde: str, fecha_hasta: str,
+) -> None:
+    """Genera y envía el gráfico en segundo plano. Si falla, se silencia
+    (el texto ya llegó)."""
+    try:
+        informe = await asyncio.to_thread(
+            inventario.obtener_informe_material,
+            bodega_id=bodega_id, material_nombre=material_nombre,
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+        )
+    except Exception:
+        return  # si falla la consulta del gráfico, se silencia
+
+    if not (informe.get("entradas") or informe.get("salidas")):
+        return  # nada que graficar
+
+    try:
+        url = await asyncio.wait_for(
+            asyncio.to_thread(generar_y_subir_grafico_informe_material, informe),
+            timeout=15.0,
+        )
+    except (asyncio.TimeoutError, Exception):
+        return  # timeout o error en gráfico → se silencia
+
+    if url:
         try:
-            informe = await asyncio.to_thread(
-                inventario.obtener_informe_material,
-                bodega_id=bodega_id, material_nombre=material_nombre,
-                fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+            await enviar_imagen_whatsapp(
+                telefono, url,
+                f"Informe {informe['material']} ({fecha_desde} a {fecha_hasta})",
             )
-        except ValueError:
-            return
-        if informe.get("entradas") or informe.get("salidas"):
-            url = await asyncio.to_thread(
-                generar_y_subir_grafico_informe_material, informe)
-            if url:
-                await enviar_imagen_whatsapp(
-                    telefono, url,
-                    f"Informe {informe['material']} ({fecha_desde} a {fecha_hasta})")
+        except Exception:
+            pass  # si falla el envío de imagen, ya llegó el texto
 
 
 async def iniciar_inventario_total(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
