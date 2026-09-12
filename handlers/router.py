@@ -461,7 +461,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         return
     # `texto_normalizado` ya viene normalizado desde el inicio de la función.
     if texto_normalizado in {"reporte de hoy", "reporte hoy", "ver reporte de hoy"}:
-        await enviar_reporte_diario(telefono, bodega_id, message)
+        await iniciar_reporte_por_fecha(telefono, usuario_id, contexto)
         return
     if texto_normalizado in {"reporte de ayer", "reporte ayer", "ver reporte de ayer"}:
         await enviar_reporte_diario(telefono, bodega_id, message, dias_atras=1)
