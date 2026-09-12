@@ -59,48 +59,20 @@ async def enviar_grafico_movimientos_dia(telefono: str, bodega_id: int,
 
 
 async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre: str,
-                                  fecha_desde: str, fecha_hasta: str,
-                                  incluir_grafico: bool = False) -> None:
-    """Envía el informe por material (texto) y, opcionalmente, el gráfico
-    entradas vs salidas (por material). El usuario define las fechas.
-
-    El texto SIEMPRE se envía. El gráfico, si se solicita, se genera en
-    segundo plano y no bloquea la respuesta de texto.
+                                  fecha_desde: str, fecha_hasta: str) -> None:
+    """Envía el informe por material (texto). El usuario define las fechas
+    (puede ser una sola fecha o un rango). Sigue el mismo patrón simple que
+    ``enviar_reporte_diario``: consulta → formatear → enviar.
     """
-    # 1. Obtener el informe UNA sola vez (con timeout)
-    try:
-        informe = await asyncio.wait_for(
-            asyncio.to_thread(
-                inventario.obtener_informe_material,
-                bodega_id=bodega_id,
-                material_nombre=material_nombre,
-                fecha_desde=fecha_desde,
-                fecha_hasta=fecha_hasta,
-            ),
-            timeout=30.0,
-        )
-    except asyncio.TimeoutError:
-        await enviar_mensaje_whatsapp(telefono, "⏱️ La consulta del informe tardó demasiado. Intenta de nuevo más tarde.")
-        return
-    except ValueError as e:
-        await enviar_mensaje_whatsapp(telefono, f"⚠️ {e}")
-        return
-    except Exception as e:
-        await enviar_mensaje_whatsapp(telefono, f"⚠️ Error al consultar el informe: {e}")
-        return
-
-    # 2. Formatear y enviar el texto
-    try:
-        texto = inventario.obtener_informe_material_texto_desde_informe(informe)
-    except Exception as e:
-        await enviar_mensaje_whatsapp(telefono, f"⚠️ Error al formatear el informe: {e}")
-        return
-
+    informe = await asyncio.to_thread(
+        inventario.obtener_informe_material,
+        bodega_id=bodega_id,
+        material_nombre=material_nombre,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    )
+    texto = inventario.obtener_informe_material_texto_desde_informe(informe)
     await enviar_mensaje_whatsapp(telefono, texto)
-
-    # 3. Gráfico: solo si se pidió, en background, sin volver a consultar BD
-    if incluir_grafico:
-        asyncio.create_task(_enviar_grafico_informe_material_bg(informe, telefono))
 
 
 async def _enviar_grafico_informe_material_bg(

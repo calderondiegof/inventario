@@ -480,7 +480,7 @@ class InventarioServiceConValidacion:
         from datetime import datetime
 
         start_time = time.time()
-        material = self._material_por_nombre(material_nombre)
+        material = self.obtener_material_por_nombre(material_nombre)
         fecha_d = self.validar_fecha(fecha_desde)
         fecha_h = self.validar_fecha(fecha_hasta)
 
@@ -508,11 +508,7 @@ class InventarioServiceConValidacion:
             if cantidad > 0:
                 entradas_map[fuente] = entradas_map.get(fuente, 0.0) + cantidad
             elif cantidad < 0:
-                # Para revuelto, las salidas por transformación son "Selección"
-                if fila["tipo_movimiento"] == TipoTransaccion.TRANSFORMACION.value:
-                    etiqueta = "Selección" if not observacion or observacion.lower() == "selección" else observacion
-                else:
-                    etiqueta = observacion
+                etiqueta = observacion if observacion else "Sin observación"
                 salidas_map[etiqueta] = salidas_map.get(etiqueta, 0.0) + abs(cantidad)
 
         entradas = [{"etiqueta": k, "kg": round(v, 2)} for k, v in sorted(entradas_map.items(), key=lambda x: -x[1])]
