@@ -11,7 +11,7 @@ from core.whatsapp import (
     enviar_mensaje_whatsapp,
 )
 from reporte_grafico import (
-    generar_y_subir_grafico_informe_material, generar_y_subir_grafico_movimientos_dia,
+    generar_y_subir_grafico_movimientos_dia,
     generar_y_subir_grafico_stock,
 )
 
@@ -73,33 +73,6 @@ async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre
     )
     texto = inventario.obtener_informe_material_texto_desde_informe(informe)
     await enviar_mensaje_whatsapp(telefono, texto)
-
-
-async def _enviar_grafico_informe_material_bg(
-    informe: Dict[str, Any], telefono: str,
-) -> None:
-    """Genera y envía el gráfico en segundo plano. Si falla, se silencia
-    (el texto ya llegó). No re-consulta la BD porque recibe el informe ya obtenido."""
-    # informe ya viene como parámetro (no re-consulta BD)
-    if not (informe.get("entradas") or informe.get("salidas")):
-        return  # nada que graficar
-
-    try:
-        url = await asyncio.wait_for(
-            asyncio.to_thread(generar_y_subir_grafico_informe_material, informe),
-            timeout=15.0,
-        )
-    except (asyncio.TimeoutError, Exception):
-        return  # timeout o error en gráfico → se silencia
-
-    if url:
-        try:
-            await enviar_imagen_whatsapp(
-                telefono, url,
-                f"Informe {informe['material']} ({informe['fecha_desde']} a {informe['fecha_hasta']})",
-            )
-        except Exception:
-            pass  # si falla el envío de imagen, ya llegó el texto
 
 
 async def iniciar_inventario_total(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
