@@ -490,7 +490,13 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         elif fecha_txt in ("ayer", "de ayer"):
             await enviar_grafico_movimientos_dia(telefono, bodega_id, message, dias_atras=1)
         else:
-            f = parsear_fecha_colombiana(fecha_txt)
+            # Formato ISO AAAA-MM-DD directo (parsear_fecha_colombiana lo
+            # interpretaría como DD-MM-YYYY y daría una fecha errónea).
+            m_iso = re.match(r"^(20\d{2})-(\d{1,2})-(\d{1,2})$", fecha_txt)
+            if m_iso:
+                f = f"{m_iso.group(1)}-{int(m_iso.group(2)):02d}-{int(m_iso.group(3)):02d}"
+            else:
+                f = parsear_fecha_colombiana(fecha_txt)
             if f:
                 await enviar_grafico_movimientos_dia(telefono, bodega_id, message, fecha=f)
             else:
