@@ -75,6 +75,22 @@ async def enviar_informe_material(telefono: str, bodega_id: int, material_nombre
     await enviar_mensaje_whatsapp(telefono, texto)
 
 
+async def enviar_informe_material_seguro(telefono: str, bodega_id: int, material_nombre: str,
+                                         fecha_desde: str, fecha_hasta: str) -> None:
+    """Wrapper con try/except: si el informe falla por CUALQUIER motivo,
+    responde con el error en vez de quedarse callado (nada de 'congelados')."""
+    try:
+        await enviar_informe_material(telefono, bodega_id, material_nombre,
+                                      fecha_desde, fecha_hasta)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Error en informe de material %s: %s", material_nombre, exc)
+        await enviar_mensaje_whatsapp(
+            telefono,
+            f"⚠️ No pude generar el informe de {material_nombre}.\n"
+            f"Motivo: {exc}"
+        )
+
+
 async def iniciar_inventario_total(telefono: str, usuario_id: int, contexto: Dict[str, Any]) -> None:
     """Submenú de 'Inventario Total': botones para elegir informe en texto o gráfico."""
     contexto["borrador_pendiente"] = {}

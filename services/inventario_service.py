@@ -13,7 +13,6 @@ disponibles vía re-imports para no romper consumidores externos
 import difflib
 import hashlib
 import re
-import time
 import uuid
 from dataclasses import dataclass  # noqa: F401  (re-export)
 from datetime import date, datetime
@@ -476,10 +475,6 @@ class InventarioServiceConValidacion:
         - salidas: lista de {"etiqueta": "Selección", "kg": 9401.0}
         - total_entradas, total_salidas, movimiento, saldo_final
         """
-        import time
-        from datetime import datetime
-
-        start_time = time.time()
         material = self.obtener_material_por_nombre(material_nombre)
         if material is None:
             raise ValueError(f"No encontré el material '{material_nombre}'.")
@@ -535,44 +530,7 @@ class InventarioServiceConValidacion:
             "saldo_final": saldo_final,
         }
 
-    def obtener_informe_material_texto(self, *, bodega_id: int, material_nombre: str,
-                                        fecha_desde: str, fecha_hasta: str) -> str:
-        """Formatea el informe por material como texto para WhatsApp."""
-        informe = self.obtener_informe_material(
-            bodega_id=bodega_id, material_nombre=material_nombre,
-            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
-        )
-
-        lineas = [
-            f"📋 Informe de {informe['material'].upper()} — Bodega #{informe['bodega_id']}",
-            f"Período: {informe['fecha_desde']} al {informe['fecha_hasta']}",
-            "",
-            f"Saldo inicial: {informe['saldo_inicial']:,.2f} kg",
-            "",
-        ]
-
-        if informe["entradas"]:
-            lineas.append(f"ENTRADAS {informe['material'].upper()}")
-            for entrada in informe["entradas"]:
-                lineas.append(f"  {entrada['etiqueta']}: {entrada['kg']:,.2f} kg")
-            lineas.append(f"Total Entradas: {informe['total_entradas']:,.2f} kg")
-
-        if informe["salidas"]:
-            lineas.append("")
-            lineas.append(f"SALIDAS {informe['material'].upper()}")
-            for salida in informe["salidas"]:
-                lineas.append(f"  {salida['etiqueta']}: -{salida['kg']:,.2f} kg")
-            lineas.append(f"Total Salidas: -{informe['total_salidas']:,.2f} kg")
-
-        lineas.extend([
-            "",
-            f"Total movimientos período: {informe['movimiento']:+,.2f} kg",
-            f"Saldo final ({informe['fecha_hasta']}): {informe['saldo_final']:,.2f} kg",
-        ])
-
-        return "\n".join(lineas)
-
-    def obtener_informe_material_texto_desde_informe(self, *, informe: Dict[str, Any]) -> str:
+    def obtener_informe_material_texto_desde_informe(self, informe: Dict[str, Any]) -> str:
         """Formatea un informe (dict) ya obtenido como texto para WhatsApp.
         Revisa ``obtener_informe_material`` para ver la estructura esperada."""
         material = informe.get("material", "Desconocido")

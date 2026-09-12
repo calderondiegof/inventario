@@ -17,7 +17,8 @@ from handlers import remisiones_handler
 from handlers import pdf_handler
 from handlers.consultas_handler import (
     enviar_grafico_inventario, enviar_grafico_movimientos_dia,
-    enviar_informe_material, enviar_inventario_total, enviar_reporte_diario,
+    enviar_informe_material, enviar_informe_material_seguro,
+    enviar_inventario_total, enviar_reporte_diario,
     iniciar_inventario_total, iniciar_reporte_por_fecha,
     pedir_movimientos_material,
 )
@@ -541,7 +542,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
                     fecha_desde = fecha_hasta = fechas[0]
                 else:
                     fecha_desde, fecha_hasta = fechas[0], fechas[-1]
-                await enviar_informe_material(
+                await enviar_informe_material_seguro(
                     telefono, bodega_id, material,
                     fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
                 )
