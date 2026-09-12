@@ -481,19 +481,21 @@ class InventarioServiceConValidacion:
 
         start_time = time.time()
         material = self.obtener_material_por_nombre(material_nombre)
+        if material is None:
+            raise ValueError(f"No encontré el material '{material_nombre}'.")
         fecha_d = self.validar_fecha(fecha_desde)
         fecha_h = self.validar_fecha(fecha_hasta)
 
         # Saldo inicial: suma de movimientos antes del período
         previos = self.supabase.table("movimientos_inventario").select("cantidad_kg").eq(
-            "bodega_id", bodega_id).eq("material_id", material["id"]).lt(
+            "bodega_id", bodega_id).eq("material_id", material.id).lt(
             "fecha_operacion", fecha_d).execute().data or []
         saldo_inicial = sum(float(f["cantidad_kg"]) for f in previos)
 
         # Movimientos del período
         filas = self.supabase.table("movimientos_inventario").select(
             "fecha_operacion,tipo_movimiento,cantidad_kg,observaciones,fuentes_origen(nombre)"
-        ).eq("bodega_id", bodega_id).eq("material_id", material["id"]).gte(
+        ).eq("bodega_id", bodega_id).eq("material_id", material.id).gte(
             "fecha_operacion", fecha_d).lte("fecha_operacion", fecha_h).execute().data or []
 
         # Agrupar entradas por fuente
@@ -520,7 +522,7 @@ class InventarioServiceConValidacion:
         saldo_final = round(saldo_inicial + movimiento, 2)
 
         return {
-            "material": material["nombre"],
+            "material": material.nombre,
             "bodega_id": bodega_id,
             "fecha_desde": fecha_d,
             "fecha_hasta": fecha_h,
