@@ -76,10 +76,6 @@ from utils.parsing_utils import (
 
 # ---------------------------------------------------------------------------
 
-# Constante de parsing usada por resolver_lista_materiales.
-_LINEA_MATERIAL_CANTIDAD = re.compile(
-    r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE
-)
 
 # Sinónimos específicos del dominio del inventario (negocio).
 SINONIMOS_MATERIAL: Dict[str, str] = {
@@ -219,7 +215,7 @@ class InventarioServiceConValidacion:
                 return self.catalogo_materiales[candidatos[0]]
         return None
 
-    def resolver_lista_materiales(self, texto: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def resolver_lista_materiales(self, texto: str) -> Tuple[List[Dict[str, Any]], List[str], float]:
         """Convierte el texto del usuario (lista con viñetas o líneas
         'Material Cantidad') en items del catálogo garantizando:
 
@@ -244,7 +240,11 @@ class InventarioServiceConValidacion:
         """
         lineas = [l.strip().lstrip("*-•").strip()
                   for l in re.split(r"[\n,;]+", texto or "")]
-        from utils.parsers import es_nombre_merma, extraer_fecha_texto
+        from utils.parsers import (
+            es_nombre_merma,
+            extraer_fecha_texto,
+            parsear_material_cantidad,
+        )
         items: List[Dict[str, Any]] = []
         acumulados: Dict[str, float] = {}
         no_encontrados: List[str] = []
@@ -257,10 +257,16 @@ class InventarioServiceConValidacion:
             # 04-09-2026 kg (Material no encontrado)').
             if extraer_fecha_texto(linea):
                 continue
-            m = _LINEA_MATERIAL_CANTIDAD.match(linea)
-            if not m:
+            par = parsear_material_cantidad(linea)
+            if not par:
+                # Línea que no es "material cantidad". Si trae dígitos se asume
+                # que el usuario quiso registrar un ítem y se reporta como
+                # omitida (nada se descarta en silencio); si no trae dígitos es
+                # un encabezado (ej. "Selección hoy") y se ignora.
+                if any(c.isdigit() for c in linea):
+                    no_encontrados.append(linea)
                 continue
-            nombre, cantidad = m.group(1).strip(), float(m.group(2).replace(",", "."))
+            nombre, cantidad = par
             # Merma por NOMBRE (independiente del catálogo): cualquier línea que
             # empiece con 'basura'/'tierra' (ej. 'basura plastico', 'basura
             # plastico goma', 'basura tierra') es MERMA y NUNCA se suma al

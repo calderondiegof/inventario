@@ -17,9 +17,29 @@ from utils.number_parser import _parsear_numero
 logger = logging.getLogger(__name__)
 
 LINEA_MATERIAL_CANTIDAD = re.compile(r"^\s*(.+?)[\s\-:]+(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE)
+# Fallback: número PEGADO al nombre, sin separador de espacio
+# (ej. "Rechazo de aluminio419" -> "Rechazo de aluminio" + 419).
+# Solo se aplica si el patrón principal falla, para no alterar el caso normal.
+LINEA_MATERIAL_CANTIDAD_PEGADA = re.compile(
+    r"^\s*(.+?[^\d\s])(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*$", re.IGNORECASE
+)
 
 def parsear_material_cantidad(texto: str) -> Optional[tuple]:
-    m = LINEA_MATERIAL_CANTIDAD.match(texto.strip())
+    # El usuario escribe viñetas ("* Olla 575", "- Cobre 9"): el marcador NO
+    # es parte del nombre. Si se cuela, el nombre no resuelve contra el
+    # catálogo ("* Rechazo de aluminio" ≠ "Rechazo de aluminio") y la línea se
+    # reporta como omitida por error. Solo se quita si lo que sigue no es un
+    # dígito (para no mutilar un negativo o una cantidad suelta).
+    linea = (texto or "").strip()
+    m_marca = re.match(r"^[-*•·]+\s*(\D.*)$", linea)
+    if m_marca:
+        linea = m_marca.group(1).strip()
+    m = LINEA_MATERIAL_CANTIDAD.match(linea)
+    if m:
+        return m.group(1).strip(), float(m.group(2).replace(",", "."))
+    # Fallback: el usuario olvidó el espacio ("Rechazo de aluminio419").
+    # Sin esto la línea se descarta en silencio y el ítem nunca se registra.
+    m = LINEA_MATERIAL_CANTIDAD_PEGADA.match(linea)
     if not m:
         return None
     return m.group(1).strip(), float(m.group(2).replace(",", "."))

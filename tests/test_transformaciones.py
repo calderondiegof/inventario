@@ -725,6 +725,28 @@ def test_sinonimos_palabra_a_palabra_en_seleccion():
           abs(_saldo(fake, B, "Basura")) < 0.01)
 
 
+def test_numero_pegado_y_omitidos_reportados():
+    """Regresión del caso real: 'Rechazo de aluminio419' (número pegado a la
+    palabra) debe interpretarse como material + cantidad, y los ítems
+    desconocidos deben reportarse en `no_encontrados` (nada en silencio)."""
+    from utils.parsers import parsear_material_cantidad
+    _cons("pegado: 'Rechazo de aluminio419' -> ('Rechazo de aluminio', 419)",
+          parsear_material_cantidad("* Rechazo de aluminio419") == ("Rechazo de aluminio", 419.0))
+    _cons("normal: '* Lamina 100' sigue funcionando igual",
+          parsear_material_cantidad("* Lamina 100") == ("Lamina", 100.0))
+    fake, inv = _generar()
+    fake._seed("materiales", [
+        {"nombre": "Lamina", "tipo_material": "SEMILIMPIO", "es_comercializable": True},
+    ])
+    inv.recargar_catalogos()
+    items, no_encontrados, _merma = inv.resolver_lista_materiales("* Lamina 100\n* Vaporub 50")
+    _cons("resolver: 1 item reconocido (Lamina 100)",
+          len(items) == 1 and items[0]["material_nombre"] == "Lamina")
+    _cons("resolver: el desconocido se reporta, no se ignora (Vaporub 50)",
+          len(no_encontrados) == 1 and "Vaporub" in no_encontrados[0])
+
+
+
 def test_extraer_fecha_inline():
     """La fecha escrita inline en un mensaje nuevo (ej. '27/08 Quemé ...' o
     '26-08 se queman...') se captura de forma determinista con

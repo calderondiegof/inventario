@@ -188,9 +188,13 @@ def intentar_fast_path(texto: str, inventario, borrador: Optional[Dict[str, Any]
             continue
         # 4c) Material del catálogo (incluye sinónimos: grueso→Carter...).
         mat = inventario.obtener_material_por_nombre(nombre) if inventario else None
+        # `_reconocido` es una marca INTERNA (se descarta más abajo): permite
+        # informar los ítems que no existen en el catálogo en vez de
+        # registrarlos en silencio con un nombre inválido.
         items.append({
             "material_nombre": mat.nombre if mat else nombre,
             "cantidad_kg": cantidad,
+            "_reconocido": mat is not None,
         })
 
     # Conservador: todas las líneas debieron clasificarse y debe haber
@@ -209,7 +213,26 @@ def intentar_fast_path(texto: str, inventario, borrador: Optional[Dict[str, Any]
     if entradas:
         datos["intencion"] = "REGISTRO_DIARIO"
     if items:
-        datos["items"] = items
+        # Los ítems que NO existen en el catálogo no se registran: se informan
+        # aparte (datos['materiales_omitidos']) para avisarle al usuario. Nunca
+        # se descartan en silencio.
+        omitidos_fp = [
+            f"{it['material_nombre']} {float(it['cantidad_kg']):g} kg"
+            for it in items
+            if not it.get("_reconocido")
+        ]
+        reconocidos = [
+            {
+                "material_nombre": it["material_nombre"],
+                "cantidad_kg": it["cantidad_kg"],
+            }
+            for it in items
+            if it.get("_reconocido")
+        ]
+        if reconocidos:
+            datos["items"] = reconocidos
+        if omitidos_fp:
+            datos["materiales_omitidos"] = omitidos_fp
     if merma_kg:
         datos["merma_kg"] = merma_kg
     if entradas:
