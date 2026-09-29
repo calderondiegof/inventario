@@ -35,14 +35,23 @@ logger = logging.getLogger(__name__)
 # Encabezados de bloque → intención. Se aceptan con o sin tilde.
 _INTENCIONES_ENCABEZADO = {
     "seleccion": "SELECCION_REVUELTO",
+    "seleccion hoy": "SELECCION_REVUELTO",
+    "material de hoy": "SELECCION_REVUELTO",
+    "material limpio": "SELECCION_REVUELTO",
     "seleccion de revuelto": "SELECCION_REVUELTO",
     "seleccion revuelto": "SELECCION_REVUELTO",
     "material seleccionado": "SELECCION_REVUELTO",
     "materiales seleccionados": "SELECCION_REVUELTO",
     "venta": "VENTA_DESPACHO",
+    "venta mat": "VENTA_DESPACHO",
+    "venta material": "VENTA_DESPACHO",
+    "remision material": "VENTA_DESPACHO",
+    "salida material": "VENTA_DESPACHO",
     "salida": "VENTA_DESPACHO",
     "despacho": "VENTA_DESPACHO",
     "orden de salida": "VENTA_DESPACHO",
+    "remision": "VENTA_DESPACHO",
+    "rem": "VENTA_DESPACHO",
     "entrada": "AJUSTE_INVENTARIO",
     "ingreso": "AJUSTE_INVENTARIO",
     "registro diario": "REGISTRO_DIARIO",
@@ -64,11 +73,14 @@ _RE_FUENTE_KG = re.compile(
 _MERMA_KEYS = {"merma", "merma kg", "merma_kg", "basura kg"}
 
 # Encabezado CON sufijo: 'Venta # 2', 'venta 3', 'orden de salida #5',
-# 'seleccion del 10-09'. El prefijo (clave de _INTENCIONES_ENCABEZADO) seguido
-# de cualquier cosa corta que no parezca 'Material Cantidad' de un ítem.
+# 'seleccion del 10-09', 'venta material 26-09'. El prefijo (clave de
+# _INTENCIONES_ENCABEZADO) seguido de un sufijo corto (n° remisión, fecha,
+# 'del', o la palabra 'material/materiales') fija la intención. Sin esto,
+# el parser genérico no clasifica la línea y el mensaje cae a la IA,
+# que pregunta el tipo de movimiento.
 _RE_ENCABEZADO_PREFIJO = re.compile(
     r"^(" + "|".join(sorted(map(re.escape, _INTENCIONES_ENCABEZADO), key=len, reverse=True))
-    + r")\b(?:\s+(?:#|nro\.?|no\.?|n°|\d|del\b).*)?$"
+    + r")\b(?:\s+(?:#|nro\.?|no\.?|n°|\d|del\b|material(?:es)?\b).*)?$"
 )
 
 
