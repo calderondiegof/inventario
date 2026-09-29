@@ -784,6 +784,40 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
             datos["fecha_operacion"] = fecha_parseada
         else:
             datos = await inferir_datos_ia(usuario, bodega_id, fecha_mensaje, borrador_anterior, texto)
+    elif campo_esperado == "confirmacion_omitidos":
+        # Pregunta previa sobre ítems no reconocidos: el registro NO avanza
+        # hasta que el usuario elija corregir la lista o continuar sin esos
+        # materiales (requisito: avisar ANTES de registrar, no después).
+        respuesta = (texto or "").strip().lower()
+        if any(p in respuesta for p in ("sin esos", "sin ese", "sin los", "sin esa", "seguir", "continuar", "omitir")):
+            datos = dict(borrador_anterior or {})
+            datos["_omitidos_confirmados"] = True  # ya se avisó: no volver a preguntar
+            # continúa abajo: consolidar → validar → registrar con los ítems válidos
+        elif es_lista_materiales(texto or ""):
+            # Reenvió la lista corregida directamente: se descarta el borrador
+            # anterior y se interpreta como mensaje nuevo (sin fusionar ítems
+            # del intento anterior).
+            contexto["borrador_pendiente"] = {}
+            contexto["campo_esperado"] = None
+            await guardar_contexto(usuario_id, contexto)
+            datos = intentar_fast_path(texto, inventario, {})
+        elif any(p in respuesta for p in ("corregir", "editar", "cambiar", "reenviar", "otra vez")):
+            contexto["borrador_pendiente"] = {}
+            contexto["campo_esperado"] = None
+            await guardar_contexto(usuario_id, contexto)
+            await enviar_mensaje_whatsapp(
+                telefono,
+                "✅ Ok, descarté la lista anterior. Envía de nuevo la lista corregida completa."
+            )
+            return MANEJADO
+        else:
+            await enviar_mensaje_whatsapp(
+                telefono,
+                "⚠️ Responde una opción:\n"
+                "• *SIN ESOS* → registrar lo demás sin esos materiales.\n"
+                "• *CORREGIR* → enviar la lista corregida completa."
+            )
+            return MANEJADO
     else:
         # FAST PATH determinista: si el mensaje encaja con los bloques
         # estructurados que usan los operadores (encabezado Selección/Venta +
@@ -853,6 +887,25 @@ async def procesar_wizard_registro(message: Dict[str, Any], texto: str, texto_no
         contexto["campo_esperado"] = campo
         await guardar_contexto(usuario_id, contexto)
         await enviar_mensaje_whatsapp(telefono, mensaje_faltante)
+        return MANEJADO
+    # Confirmación PREVIA de ítems no reconocidos: si la lista trae materiales
+    # que no están en el catálogo (línea mal escrita, número pegado, etc.) NO
+    # se registra todavía: se informa al usuario y se le pregunta si corrige
+    # la lista o si registra sin esos materiales (nada de avisos a posteriori).
+    omitidos_previos = [str(o).strip() for o in (datos.get("materiales_omitidos") or []) if str(o).strip()]
+    if omitidos_previos and not datos.get("_omitidos_confirmados"):
+        contexto["borrador_pendiente"] = datos
+        contexto["campo_esperado"] = "confirmacion_omitidos"
+        await guardar_contexto(usuario_id, contexto)
+        detalle = "\n".join(f"  • {o}" for o in omitidos_previos)
+        await enviar_mensaje_whatsapp(
+            telefono,
+            "⚠️ *Atención:* estos ítems NO se pudieron reconocer y NO se "
+            f"registrarán:\n{detalle}\n\n"
+            "¿Qué deseas hacer?\n"
+            "• Responde *SIN ESOS* para registrar lo demás sin esos materiales.\n"
+            "• Responde *CORREGIR* para enviar la lista corregida completa."
+        )
         return MANEJADO
     # PROTECCIÓN 1 (estado): el borrador se purga ANTES del guardado final.
     # Si llega un duplicado/reintento mientras se escribe en DB, el contexto

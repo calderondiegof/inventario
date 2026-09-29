@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 # Encabezados de bloque → intención. Se aceptan con o sin tilde.
 _INTENCIONES_ENCABEZADO = {
+    "rem": "VENTA_DESPACHO",
+    "remision": "VENTA_DESPACHO",
+    "remision material": "VENTA_DESPACHO",
+    "remision de material": "VENTA_DESPACHO",
+    "venta mat": "VENTA_DESPACHO",
+    "venta de material": "VENTA_DESPACHO",
+    "salida material": "VENTA_DESPACHO",
+    "salida de material": "VENTA_DESPACHO",
+    "orden de salida": "VENTA_DESPACHO",
+
     "seleccion": "SELECCION_REVUELTO",
     "seleccion hoy": "SELECCION_REVUELTO",
     "material de hoy": "SELECCION_REVUELTO",
@@ -42,6 +52,8 @@ _INTENCIONES_ENCABEZADO = {
     "seleccion revuelto": "SELECCION_REVUELTO",
     "material seleccionado": "SELECCION_REVUELTO",
     "materiales seleccionados": "SELECCION_REVUELTO",
+    "rem material": "VENTA_DESPACHO",
+    "remision de material": "VENTA_DESPACHO",
     "venta": "VENTA_DESPACHO",
     "venta mat": "VENTA_DESPACHO",
     "venta material": "VENTA_DESPACHO",
@@ -55,6 +67,11 @@ _INTENCIONES_ENCABEZADO = {
     "entrada": "AJUSTE_INVENTARIO",
     "ingreso": "AJUSTE_INVENTARIO",
     "registro diario": "REGISTRO_DIARIO",
+    "remisiones": "VENTA_DESPACHO",
+    "remision mat": "VENTA_DESPACHO",
+    "material 22-09": "VENTA_DESPACHO",
+    "orden de salida material": "VENTA_DESPACHO",
+    "salida mat": "VENTA_DESPACHO",
 }
 
 # Líneas de bloque secundario sin intención que se ignoran (no invalidan el
