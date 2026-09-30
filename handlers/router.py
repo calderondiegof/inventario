@@ -453,7 +453,7 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
         # Sin borrador previo ni intento de selección: va directo al menú.
         await iniciar_creacion(telefono, usuario_id, context)
         return
-    if texto.lower() in {"ver grafico", "ver gráfico", "reporte visual"}:
+    if texto_normalizado in {"ver grafico", "ver informe grafico", "informe grafico", "reporte visual"}:
         url = await asyncio.to_thread(generar_y_subir_grafico_stock, bodega_id)
         if url:
             await enviar_imagen_whatsapp(telefono, url, f"Inventario de la bodega {bodega_id}")
@@ -510,8 +510,12 @@ async def procesar_un_mensaje(message: Dict[str, Any], contactos: List[Dict[str,
     # Informe por material: "informe cobre", "informe revuelto desde 05-09-2026
     # hasta 10-09-2026", etc. El usuario define las fechas (una sola fecha = ese
     # día; sin fecha = hoy).
-    if texto_normalizado.startswith("informe "):
-        resto = texto_normalizado[len("informe "):].strip()
+    if texto_normalizado.startswith("informe ") or texto_normalizado.startswith("reporte pdf "):
+        resto = (
+            texto_normalizado[len("reporte pdf "):].strip()
+            if texto_normalizado.startswith("reporte pdf ")
+            else texto_normalizado[len("informe "):].strip()
+        )
         # Variante PDF: "informe pdf revuelto 10-09" o "pdf informe revuelto..."
         quiere_pdf = "pdf" in resto.split() or texto_normalizado.startswith("informe pdf")
         if quiere_pdf:
