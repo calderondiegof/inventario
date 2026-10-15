@@ -280,8 +280,9 @@ def consolidar_seleccion(datos: Dict[str, Any], texto: str) -> None:
         vendibles: List[Dict[str, Any]] = []
         merma_items = 0.0
         hay_merma_en_items = False
+        _obtener_mat = getattr(inventario, "obtener_material_por_nombre", None)
         for it in items:
-            mat = inventario.obtener_material_por_nombre(it.get("material_nombre") or "")
+            mat = _obtener_mat(it.get("material_nombre") or "") if callable(_obtener_mat) else None
             if es_nombre_merma(it.get("material_nombre")) or (
                 mat and (mat.tipo_material or "").upper() == "MERMA"
             ):

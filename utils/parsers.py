@@ -152,9 +152,10 @@ MESES_ES = {
 # Un día y un mes, separados por '-', '/' o espacio, con año opcional (dd-mm-aaaa).
 # El lookahead negativo (?!\d) evita capturar números de varias cifras (kg).
 _FECHA_NUM = re.compile(r"(\d{1,2})\s*[-/ ]\s*(\d{1,2})(?:\s*[-/ ]\s*(\d{2,4}))?(?!\d)")
-# Día + mes por nombre (ej. '04 sep', '04 septiembre'), año opcional.
+# Día + mes por nombre (ej. '04 sep', '04 septiembre', '14 de octubre',
+# '14 de octubre de 2026'), año opcional.
 _FECHA_NOMBRE = re.compile(
-    r"(\d{1,2})\s*[-/ ]\s*([a-z]+)(?:\s*[-/ ]\s*(\d{2,4}))?(?!\d)", re.IGNORECASE)
+    r"(\d{1,2})\s*(?:de\s+)?([a-z]+)(?:\s*(?:de\s+)?(\d{2,4}))?(?!\d)", re.IGNORECASE)
 
 
 def _coincidencia_fecha(texto: str) -> Optional[Tuple[int, int, Optional[int]]]:

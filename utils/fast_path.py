@@ -103,8 +103,12 @@ _RE_ENCABEZADO_PREFIJO = re.compile(
 
 def _limpiar_linea(linea: str) -> str:
     ln = (linea or "").strip()
-    # Viñetas de WhatsApp y numeraciones.
-    ln = re.sub(r"^[\*\-\•\u2022\d]+[\)\.\:\s]+", "", ln).strip()
+    # Viñetas de WhatsApp y numeraciones. El lookahead (?=\D) evita comer un
+    # número que sea PARTE del contenido: '14 de octubre' no es la viñeta 14,
+    # 'Remision 127' no es la viñeta 127. Solo se limpia cuando tras el
+    # número/marca viene una letra o símbolo (*, -, •), no un dígito ni 'de'.
+    ln = re.sub(r"^[\*\-\•\u2022]+[\.\)\:\s]+", "", ln).strip()
+    ln = re.sub(r"^\d+[\)\.\:]\s+(?=\D)", "", ln).strip()
     return ln
 
 
@@ -156,6 +160,7 @@ def intentar_fast_path(texto: str, inventario, borrador: Optional[Dict[str, Any]
     items: List[Dict[str, Any]] = []
     entradas: List[Dict[str, Any]] = []
     merma_kg = 0.0
+    libres: List[str] = []  # líneas de persona (cliente/conductor) en ventas
     intencion: Optional[str] = None
     fecha: Optional[str] = None
     n_clasificadas = 0
@@ -192,6 +197,20 @@ def intentar_fast_path(texto: str, inventario, borrador: Optional[Dict[str, Any]
         # 4) Líneas "Material Cantidad" / "Fuente Cantidad".
         par = parsear_material_cantidad(ln)
         if not par:
+            # VENTA con cliente/conductor en líneas sueltas (ej. 'Fabian
+            # caveda' / 'juan cattaneo' antes de los materiales): se toman
+            # como cliente (1ª) y conductor (2ª) en vez de abortar. Solo
+            # cuando la intención ya es VENTA y aún no hay ítems (las líneas
+            # de persona van antes de los materiales). Máx 2 líneas, sin
+            # dígitos (un número sería otra cosa: remisión, placa, etc.).
+            if (intencion == "VENTA_DESPACHO" and not items and not entradas
+                    and merma_kg == 0 and len(libres) < 2
+                    and not any(ch.isdigit() for ch in ln)
+                    and not _RE_ENCABEZADO_PREFIJO.match(ln_norm)
+                    and ln_norm not in _LINEAS_RUIDO):
+                libres.append(ln.strip())
+                n_clasificadas += 1
+                continue
             # Línea libre no clasificable → el mensaje no es estructurado.
             logger.info("Fast path: línea no clasificable '%s' → fallback IA", ln)
             return None
@@ -239,6 +258,11 @@ def intentar_fast_path(texto: str, inventario, borrador: Optional[Dict[str, Any]
     datos: Dict[str, Any] = {}
     if intencion:
         datos["intencion"] = intencion
+    if libres and intencion == "VENTA_DESPACHO":
+        # 1ª línea de persona → cliente, 2ª → conductor.
+        datos["cliente"] = libres[0]
+        if len(libres) > 1:
+            datos["cliente_conductor"] = libres[1]
     if entradas:
         datos["intencion"] = "REGISTRO_DIARIO"
     if items:
